@@ -133,10 +133,10 @@ std::string CpsExpr(const Expr *E, const std::string &ContAccess,
       std::string innerDef =
           "class " + inner + " : public UtilFunc {\n"
           "public:\n"
-          "  int lval;\n"
+          "  " + Ctx.RetType + " lval;\n"
           "  UtilFunc* cont;\n"
-          "  " + inner + "(int lval, UtilFunc* cont) : lval(lval), cont(cont) {}\n"
-          "  " + Ctx.UnitType + " eval(int rval) {\n"
+          "  " + inner + "(" + Ctx.RetType + " lval, UtilFunc* cont) : lval(lval), cont(cont) {}\n"
+          "  " + Ctx.UnitType + " eval(" + Ctx.RetType + " rval) {\n"
           "    return " + Ctx.UnitType + "(" + Ctx.ArgType + "(lval " + op +
           " rval, cont), advance, false);\n"
           "  }\n"
@@ -169,43 +169,46 @@ std::string CpsExpr(const Expr *E, const std::string &ContAccess,
 
     // Only LHS recursive
     if (lhsRec && !rhsRec) {
+      std::string rhsStr = PrintExpr(RHS, Ctx.ASTCtx);
       std::string cls = Ctx.NewClosure();
       std::string clsDef =
           "class " + cls + " : public UtilFunc {\n"
           "public:\n"
+          "  " + Ctx.RetType + " saved_rhs;\n"
           "  UtilFunc* cont;\n"
-          "  " + cls + "(UtilFunc* cont) : cont(cont) {}\n"
-          "  " + Ctx.UnitType + " eval(int lval) {\n"
+          "  " + cls + "(" + Ctx.RetType + " saved_rhs, UtilFunc* cont) : saved_rhs(saved_rhs), cont(cont) {}\n"
+          "  " + Ctx.UnitType + " eval(" + Ctx.RetType + " lval) {\n"
           "    return " + Ctx.UnitType + "(" + Ctx.ArgType + "(lval " + op +
-          " " + PrintExpr(RHS, Ctx.ASTCtx) + ", cont), advance, false);\n"
+          " saved_rhs, cont), advance, false);\n"
           "  }\n"
           "};\n";
       Ctx.Closures.push_back(clsDef);
 
-      std::string lhsStart = StartRecursiveCall(LHS, "new " + cls + "(" + ContAccess + ")", Ctx);
+      std::string lhsStart = StartRecursiveCall(LHS, "new " + cls + "(" + rhsStr + ", " + ContAccess + ")", Ctx);
       if (!lhsStart.empty()) return lhsStart;
-      return CpsExpr(LHS, "new " + cls + "(" + ContAccess + ")", Ctx);
+      return CpsExpr(LHS, "new " + cls + "(" + rhsStr + ", " + ContAccess + ")", Ctx);
     }
 
     // Only RHS recursive
     if (!lhsRec && rhsRec) {
+      std::string lhsStr = PrintExpr(LHS, Ctx.ASTCtx);
       std::string cls = Ctx.NewClosure();
       std::string clsDef =
           "class " + cls + " : public UtilFunc {\n"
           "public:\n"
+          "  " + Ctx.RetType + " saved_lhs;\n"
           "  UtilFunc* cont;\n"
-          "  " + cls + "(UtilFunc* cont) : cont(cont) {}\n"
-          "  " + Ctx.UnitType + " eval(int rval) {\n"
-          "    return " + Ctx.UnitType + "(" + Ctx.ArgType + "(" +
-          PrintExpr(LHS, Ctx.ASTCtx) + " " + op +
+          "  " + cls + "(" + Ctx.RetType + " saved_lhs, UtilFunc* cont) : saved_lhs(saved_lhs), cont(cont) {}\n"
+          "  " + Ctx.UnitType + " eval(" + Ctx.RetType + " rval) {\n"
+          "    return " + Ctx.UnitType + "(" + Ctx.ArgType + "(saved_lhs " + op +
           " rval, cont), advance, false);\n"
           "  }\n"
           "};\n";
       Ctx.Closures.push_back(clsDef);
 
-      std::string rhsStart = StartRecursiveCall(RHS, "new " + cls + "(" + ContAccess + ")", Ctx);
+      std::string rhsStart = StartRecursiveCall(RHS, "new " + cls + "(" + lhsStr + ", " + ContAccess + ")", Ctx);
       if (!rhsStart.empty()) return rhsStart;
-      return CpsExpr(RHS, "new " + cls + "(" + ContAccess + ")", Ctx);
+      return CpsExpr(RHS, "new " + cls + "(" + lhsStr + ", " + ContAccess + ")", Ctx);
     }
   }
 
@@ -277,7 +280,45 @@ std::string GenerateCPS(const FunctionDecl *FD) {
   }
 
   // ==========================================================
-  // Emit generated code
+  // Tail-recursion optimization: if the recursive branch is a
+  // direct call func(args) with no post-call computation, emit
+  // a simple while-loop instead of full CPS+Trampoline.
+  // ==========================================================
+  if (const CallExpr *RecCall = dyn_cast<CallExpr>(RecExpr)) {
+    if (const FunctionDecl *Callee = RecCall->getDirectCallee()) {
+      if (Callee->getNameAsString() == Ctx.FuncName) {
+        std::ostringstream os;
+        os << "// === Generated tail-recursion optimized code for function: "
+           << Ctx.FuncName << " ===\n\n";
+        os << Ctx.RetType << " " << Ctx.FuncName << "(";
+        for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+          if (i > 0) os << ", ";
+          std::string pType = FD->getParamDecl(i)->getType().getAsString();
+          std::string pName = FD->getParamDecl(i)->getNameAsString();
+          os << pType << " " << pName;
+        }
+        os << ") {\n";
+        os << "  while (1) {\n";
+        os << "    if (" << PrintExpr(Cond, Ctx.ASTCtx) << ") return "
+           << PrintExpr(BaseExpr, Ctx.ASTCtx) << ";\n";
+        // Use temporaries to avoid parameter-update ordering issues
+        for (unsigned i = 0; i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
+          os << "    auto new_" << FD->getParamDecl(i)->getNameAsString()
+             << " = " << PrintExpr(RecCall->getArg(i), Ctx.ASTCtx) << ";\n";
+        }
+        for (unsigned i = 0; i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
+          os << "    " << FD->getParamDecl(i)->getNameAsString()
+             << " = new_" << FD->getParamDecl(i)->getNameAsString() << ";\n";
+        }
+        os << "  }\n";
+        os << "}\n";
+        return os.str();
+      }
+    }
+  }
+
+  // ==========================================================
+  // Emit generated CPS code
   // ==========================================================
   std::ostringstream os;
 
