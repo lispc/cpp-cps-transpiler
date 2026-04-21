@@ -1,5 +1,9 @@
 
+// ================================
+// Generated CPS + Trampoline code
+// ================================
 
+// === Generated CPS code for function: fib ===
 
 class UtilFunc;
 
@@ -22,31 +26,34 @@ Unit<fibArg> advance(fibArg);
 Unit<fibArg> fib_cps(fibArg);
 
 class UtilFunc {
-public:
+  public:
   virtual Unit<fibArg> eval(int x) {
     return Unit<fibArg>(fibArg(x, this), advance, true);
   }
 };
 
-class CpsClosure_0 : public UtilFunc {
-public:
-  int lval;
+class CpsClosure_1 : public UtilFunc {
+  public:
+  int v0;
+  fibArg saved_arg;
   UtilFunc* cont;
-  CpsClosure_0(int lval, UtilFunc* cont) : lval(lval), cont(cont) {}
-  Unit<fibArg> eval(int rval) {
-    return Unit<fibArg>(fibArg(lval + rval, cont), advance, false);
+  CpsClosure_1(int v0, fibArg saved_arg, UtilFunc* cont) : v0(v0), saved_arg(saved_arg), cont(cont) {}
+  Unit<fibArg> eval(int v1) {
+    auto arg = saved_arg;
+    auto n = arg.n;
+    return Unit<fibArg>(fibArg((v0 + v1), cont), advance, false);
   }
 };
 
-class CpsClosure_1 : public UtilFunc {
-public:
+class CpsClosure_0 : public UtilFunc {
+  public:
   fibArg saved_arg;
   UtilFunc* cont;
-  CpsClosure_1(fibArg saved_arg, UtilFunc* cont) : saved_arg(saved_arg), cont(cont) {}
-  Unit<fibArg> eval(int lval) {
+  CpsClosure_0(fibArg saved_arg, UtilFunc* cont) : saved_arg(saved_arg), cont(cont) {}
+  Unit<fibArg> eval(int v0) {
     auto arg = saved_arg;
     auto n = arg.n;
-    return Unit<fibArg>(fibArg(n - 2, new CpsClosure_0(lval, cont)), fib_cps, false);
+    return Unit<fibArg>(fibArg(n - 2, new CpsClosure_1(v0, saved_arg, cont)), fib_cps, false);
   }
 };
 
@@ -54,7 +61,7 @@ Unit<fibArg> fib_cps(fibArg arg) {
   auto n = arg.n;
   return n <= 1
     ? Unit<fibArg>(fibArg(n, arg.f), advance, false)
-    : Unit<fibArg>(fibArg(n - 1, new CpsClosure_1(arg, arg.f)), fib_cps, false);
+    : Unit<fibArg>(fibArg(n - 1, new CpsClosure_0(arg, arg.f)), fib_cps, false);
 }
 
 Unit<fibArg> advance(fibArg arg) {
@@ -77,12 +84,3 @@ int fib(int n) {
 }
 
 
-
-#include <iostream>
-
-int main() {
-  for (int i = 0; i <= 10; ++i) {
-    std::cout << "fib(" << i << ") = " << fib(i) << std::endl;
-  }
-  return 0;
-}

@@ -1,8 +1,10 @@
 # CPS Transpiler
 
-基于 LLVM/Clang LibTooling 的 C++ 源码到源码 transpiler，自动将**递归函数**转换为 **CPS（Continuation Passing Style）+ Trampoline** 的迭代版本，消除调用栈溢出的风险。
+将 C++ 递归函数自动转换为**无栈溢出风险**的迭代版本。
 
-灵感来自手写版 `cps.cc` —— 本项目旨在**自动化**同样的转换过程。
+基于 LLVM/Clang LibTooling 实现源码到源码的 transpilation，支持两种转换策略：
+- **尾递归优化（TRO）**：纯尾递归 → 高效的 `while` 循环
+- **CPS + Trampoline**：非尾递归 → Continuation Passing Style + 蹦床迭代
 
 ---
 
@@ -13,10 +15,10 @@
 - macOS / Linux
 - CMake >= 3.20
 - LLVM/Clang 开发库（本项目使用 LLVM 21）
-- Homebrew 安装的 LLVM：
-  ```bash
-  brew install llvm
-  ```
+
+```bash
+brew install llvm
+```
 
 ### 构建
 
@@ -31,7 +33,7 @@ make -j$(sysctl -n hw.ncpu)
 ### 运行
 
 ```bash
-# 转换递归函数并打印生成的 CPS 代码
+# 转换并打印生成的 CPS 代码
 ./cps-transpiler ../tests/test_input_fib.cc --
 
 # 保存到文件
@@ -40,30 +42,15 @@ make -j$(sysctl -n hw.ncpu)
 
 ### 测试
 
-项目目前包含 3 组测试：
-
 ```bash
-# 1. fibonacci —— 双边加法递归（CPS + Trampoline）
-clang++ -std=c++17 ../tests/example_output_fib.cc -o example_output_fib
-./example_output_fib
-# fib(0) = 0 ... fib(10) = 55
-
-# 2. 阶乘 —— 单边乘法递归（CPS + Trampoline）
-clang++ -std=c++17 ../tests/example_output_fact.cc -o example_output_fact
-./example_output_fact
-# fact(0) = 1 ... fact(10) = 3628800
-
-# 3. clamp_down —— 纯尾递归（自动优化为 while 循环）
-clang++ -std=c++17 ../tests/example_output_tailrec.cc -o example_output_tailrec
-./example_output_tailrec
-# clamp_down(15) = 10, clamp_down(100) = 10
+python3 run_tests.py
 ```
 
 ---
 
-## 示例
+## 效果对比
 
-### 输入（递归版）
+### 输入
 
 ```cpp
 int fib(int n) {
@@ -72,7 +59,7 @@ int fib(int n) {
 }
 ```
 
-### 输出（自动生成的 CPS + Trampoline 迭代版）
+### 输出（自动生成）
 
 ```cpp
 struct fibArg {
@@ -90,7 +77,7 @@ struct Unit {
       : arg(arg), nextf(nextf), finished(finished) {}
 };
 
-// ... UtilFunc, CpsClosure_0, CpsClosure_1 ...
+// ... closures ...
 
 Unit<fibArg> fib_cps(fibArg arg) {
   auto n = arg.n;
@@ -104,7 +91,20 @@ int fib(int n) {
 }
 ```
 
-完整生成代码见 [`example_output_fib.cc`](example_output_fib.cc)。
+完整代码见 [`tests/example_output_fib.cc`](tests/example_output_fib.cc)。
+
+---
+
+## 支持的转换场景
+
+| 场景 | 示例 | 策略 |
+|------|------|------|
+| 双边加法递归 | `fib(n-1) + fib(n-2)` | CPS + Trampoline |
+| 单边乘法递归 | `n * fact(n-1)` | CPS + Trampoline |
+| 纯尾递归 | `return clamp_down(n-1)` | `while` 循环 |
+| 函数调用包裹 | `double_it(fact(n-1))` | CPS + Trampoline |
+| 一元运算符 | `-(neg_fact(n-1))` | CPS + Trampoline |
+| 条件表达式 | `cond ? f(n-1) : f(n-2)` | CPS + Trampoline |
 
 ---
 
@@ -112,7 +112,7 @@ int fib(int n) {
 
 ### 为什么需要 CPS？
 
-`fib(n-1) + fib(n-2)` 不是**尾递归**，编译器无法直接优化为循环。CPS 将"递归调用之后的剩余计算"显式化为一个对象（continuation），从而让所有调用都变成尾调用。
+`fib(n-1) + fib(n-2)` 不是**尾递归**，编译器无法直接优化为循环。CPS 将"递归调用之后的剩余计算"显式化为 continuation 对象，从而让所有调用都变成尾调用。
 
 ### 转换流水线
 
@@ -123,18 +123,17 @@ int fib(int n) {
 [Clang AST 解析]
      |
      v
-[递归检测] —— 检查函数体内是否有直接调用自身的 CallExpr
+[递归检测]
      |
      v
 [尾递归检测]
-     |-- 是 pure tail recursion? --> [while 循环优化]
-     |-- 否                              |
-     v                                   v
-[CPS 变换器]                    简洁的 while(1)
-     - 打包参数为 Arg 结构
-     - 双边递归 → 嵌套 Closure
-     - 单边递归 → 单 Closure 捕获非递归侧值
-     - 基础情况通过 continuation 传递结果
+     |-- 所有递归调用都在尾部位置? --> [while 循环]
+     |-- 否                                |
+     v                                     v
+[CPS 变换器]                       简洁迭代
+     - 在表达式中收集递归调用（holes）
+     - 按 DFS 顺序生成嵌套 Closure 链
+     - 最后一个 Closure 计算最终结果
      |
      v
 [代码生成]
@@ -143,18 +142,34 @@ int fib(int n) {
      - 保留原签名的 wrapper 函数
 ```
 
+### 通用表达式 CPS 变换
+
+旧版仅支持 `+ - * /` 二元运算符。新版支持**任意表达式上下文**中的递归调用：
+
+- **二元运算符**：`a + f(n-1)`、`a * f(n-1)`
+- **一元运算符**：`-f(n-1)`、`!f(n-1)`
+- **函数调用**：`foo(f(n-1), bar)`
+- **条件表达式**：`cond ? f(n-1) : f(n-2)`
+- **数组下标**：`arr[f(n)]`
+- **成员访问**：`obj.val[f(n)]`
+
+核心算法：
+1. `CollectHoles`：在 AST 中收集所有直接递归调用
+2. `PrintExprWithReplacements`：将已处理的 hole 替换为变量名
+3. `CpsExprWithHoles`：生成嵌套 Closure，每个 Closure 的 `eval` 接收一个结果并启动下一个递归调用或计算最终表达式
+
 ### 尾递归优化
 
-如果 `return` 后面**直接**就是递归调用（没有任何后续运算），transpiler 会跳过 CPS，直接生成等价的 `while` 循环：
+当函数体中**所有**递归调用都处于尾部位置时，直接生成 `while` 循环，无需任何 CPS 开销：
 
 ```cpp
 // 输入
 int clamp_down(int n) {
   if (n <= 10) return n;
-  return clamp_down(n - 1);   // 纯尾递归
+  return clamp_down(n - 1);
 }
 
-// 输出（无需 trampoline/closure）
+// 输出
 int clamp_down(int n) {
   while (1) {
     if (n <= 10) return n;
@@ -164,11 +179,9 @@ int clamp_down(int n) {
 }
 ```
 
-这比 CPS+Trampoline 更高效（无堆分配、无虚函数调用）。
+### Trampoline
 
-### Trampoline（针对非尾递归）
-
-对于 `fib`、`fact` 这类在递归调用后还有运算的函数，CPS 转换后由外层 `while(1)` 循环驱动整个计算，直到 `finished` 标志为真，彻底消除了递归调用栈的增长。
+CPS 转换后的函数返回 `Unit<Arg>` 而不是直接递归调用。外层 `while(1)` 循环不断调用 `nextf` 直到 `finished` 为真，彻底消除了调用栈增长。
 
 ---
 
@@ -176,59 +189,51 @@ int clamp_down(int n) {
 
 ```
 cps/
-├── cps.cc                  # 手写参考版（Continuation Passing Style）
+├── cps.cc                    # 手写参考实现
 ├── CMakeLists.txt
-├── DESIGN.md               # 设计草案（供讨论用）
+├── DESIGN.md                 # 设计草案
 ├── README.md
+├── run_tests.py              # 自动化回归测试
 ├── tests/
-│   ├── test_input_fib.cc       # 测试输入：双边递归 fibonacci
-│   ├── example_output_fib.cc   # Transpiler 输出（可编译运行）
-│   ├── test_input_fact.cc      # 测试输入：单边递归 factorial
+│   ├── test_input_fib.cc
+│   ├── example_output_fib.cc
+│   ├── test_input_fact.cc
 │   ├── example_output_fact.cc
-│   ├── test_input_tailrec.cc   # 测试输入：纯尾递归
-│   └── example_output_tailrec.cc
+│   ├── test_input_tailrec.cc
+│   ├── example_output_tailrec.cc
+│   ├── test_input_funcwrap.cc   # 函数调用包裹递归
+│   └── test_input_unary.cc      # 一元运算符包裹递归
 └── src/
-    ├── main.cc             # Transpiler 入口（Clang Tooling 框架）
-    ├── cps_generator.h/.cc # 核心：AST 分析 + CPS 代码生成 + 尾递归优化
-    └── recursion_detector.cc
+    ├── main.cc               # Clang Tooling 前端
+    ├── cps_generator.h/.cc   # AST 分析 + CPS 代码生成 + 尾递归优化
+    ├── code_emitter.h        # 代码生成抽象层（缩进管理）
+    └── recursion_detector.cc # 占位文件
 ```
 
 ---
 
-## 当前支持 & 限制
+## 已支持 & 限制
 
 ### ✅ 已支持
 
 - 单参数函数，返回基本类型（如 `int f(int x)`）
 - 函数体形式：`if (cond) return base_expr; return recursive_expr;`
-- `recursive_expr` 中递归调用嵌套在 `+ - * /` 二元运算中
-- 双边递归（`fib(n-1) + fib(n-2)`）
-- 单边递归（`n * fact(n-1)`）
+- `recursive_expr` 中递归调用可嵌套在**任意表达式**中
+- 双边递归、单边递归、纯尾递归
 - 直接递归（函数体内直接调用自身）
-- **纯尾递归自动优化为 `while` 循环**（无需 trampoline）
+- 尾递归自动优化为 `while` 循环
 
-### 🚧 尚未支持（后续扩展方向）
+### 🚧 限制
 
-- 多参数函数
+- 多参数函数（结构已支持，但缺乏测试）
+- 更复杂的控制流（嵌套 if、switch、局部变量声明）
+- 递归调用嵌套在另一递归调用的参数中（如 `fact(fact(n-1))`）
 - 相互递归
-- 更复杂的控制流（嵌套 if、switch）
-- 任意非递归子表达式作为递归调用的上下文
-
----
-
-## 设计思路
-
-本项目遵循**最小可行产品（MVP）**原则：
-
-1. **先跑通**：从最简单的 `int fib(int)` 开始，验证整个流水线（解析 → 检测 → 变换 → 生成 → 编译 → 运行）
-2. **再扩展**：逐步支持多参数、更多表达式类型、尾递归优化等
-
-核心算法在 `src/cps_generator.cc` 中的 `CpsExpr`：对 AST 表达式做深度优先分析，遇到递归调用就生成启动 trampoline 下一跳的 `Unit`，遇到非递归部分就生成等待结果的 Closure，遇到二元运算符则根据左右两边是否含递归调用来选择生成策略。
 
 ---
 
 ## 参考
 
-- 手写参考：[cps.cc](cps.cc) —— 很久以前手写的 CPS + Trampoline fibonacci
-- Continuation Passing Style（Wikipedia）
-- [Clang LibTooling 文档](https://clang.llvm.org/docs/LibTooling.html)
+- 手写参考：[cps.cc](cps.cc)
+- [Continuation Passing Style - Wikipedia](https://en.wikipedia.org/wiki/Continuation-passing_style)
+- [Clang LibTooling](https://clang.llvm.org/docs/LibTooling.html)
