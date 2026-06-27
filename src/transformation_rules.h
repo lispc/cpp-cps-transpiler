@@ -108,6 +108,9 @@ private:
   bool appliesToIsInTailPositionExpr(const clang::FunctionDecl *FD,
                                      const BodyAnalysis &BA,
                                      const GenContext &Ctx) const;
+  bool appliesToIsPureExprIgnoringRecursiveCallsImpl(
+      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+      const GenContext &Ctx) const;
   bool appliesToEvalCondition(const clang::FunctionDecl *FD,
                               const BodyAnalysis &BA,
                               const GenContext &Ctx) const;
@@ -121,6 +124,9 @@ private:
   std::string applyIsInTailPositionExpr(const clang::FunctionDecl *FD,
                                         const BodyAnalysis &BA,
                                         GenContext &Ctx) const;
+  std::string applyIsPureExprIgnoringRecursiveCallsImpl(
+      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+      GenContext &Ctx) const;
   std::string applyEvalCondition(const clang::FunctionDecl *FD,
                                  const BodyAnalysis &BA,
                                  GenContext &Ctx) const;

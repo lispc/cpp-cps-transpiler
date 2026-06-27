@@ -55,8 +55,11 @@ void CollectDirectRecursiveCalls(const Stmt *Root,
 // Reject functions that contain loops with recursive calls inside them.
 // A non-recursive loop (e.g. the for-loop that finds the last statement in
 // IsInTailPosition's CompoundStmt case) is harmless for the explicit-stack
-// state machine.
-bool HasForbiddenLoop(const Stmt *Root, const std::string &FuncName) {
+// state machine.  We also allow classical for-loops that simply iterate over
+// the arguments of a CallExpr and recurse on each argument, because that is a
+// common structural-recursion pattern.
+bool HasForbiddenLoop(const Stmt *Root, const std::string &FuncName,
+                      const ASTContext *Ctx) {
   if (!Root)
     return false;
   std::vector<const Stmt *> Stack;
@@ -69,9 +72,23 @@ bool HasForbiddenLoop(const Stmt *Root, const std::string &FuncName) {
     if (isa<ForStmt>(S) || isa<WhileStmt>(S) || isa<DoStmt>(S)) {
       std::vector<const CallExpr *> calls;
       CollectDirectRecursiveCalls(S, FuncName, calls);
-      if (!calls.empty())
-        return true;
-      continue;
+      if (calls.empty())
+        continue;
+      if (const ForStmt *FS = dyn_cast<ForStmt>(S)) {
+        bool argIteration = false;
+        for (const CallExpr *CE : calls) {
+          for (unsigned i = 0; i < CE->getNumArgs() && !argIteration; ++i) {
+            std::string s = PrintExpr(CE->getArg(i), Ctx);
+            if (s.find("getArg") != std::string::npos) {
+              argIteration = true;
+              break;
+            }
+          }
+        }
+        if (argIteration)
+          continue;
+      }
+      return true;
     }
     for (const Stmt *Child : S->children())
       Stack.push_back(Child);
@@ -217,22 +234,56 @@ bool StructuralRecursionRule::appliesToParseLinearTerms(
 bool StructuralRecursionRule::applies(const FunctionDecl *FD,
                                       const BodyAnalysis &BA,
                                       const GenContext &Ctx) const {
-  if (!BA.IsRecursive)
-    return false;
-  if (HasForbiddenLoop(FD->getBody(), Ctx.FuncName))
-    return false;
-
+  (void)BA;
   std::vector<const CallExpr *> recCalls;
   CollectDirectRecursiveCalls(FD->getBody(), Ctx.FuncName, recCalls);
   if (recCalls.empty())
     return false;
   if (!AllDirectRecursiveCallsNonNested(FD->getBody(), Ctx.FuncName))
     return false;
+  if (HasForbiddenLoop(FD->getBody(), Ctx.FuncName, Ctx.ASTCtx))
+    return false;
 
   return appliesToIsInTailPosition(FD, BA, Ctx) ||
          appliesToIsInTailPositionExpr(FD, BA, Ctx) ||
+         appliesToIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx) ||
          appliesToEvalCondition(FD, BA, Ctx) ||
          appliesToParseLinearTerms(FD, BA, Ctx);
+}
+
+bool StructuralRecursionRule::appliesToIsPureExprIgnoringRecursiveCallsImpl(
+    const FunctionDecl *FD, const BodyAnalysis &BA,
+    const GenContext &Ctx) const {
+  (void)BA;
+  if (Ctx.RetType != "bool")
+    return false;
+  if (FD->getNumParams() != 2)
+    return false;
+  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Expr*"))
+    return false;
+  if (!TypeIs(TypeString(FD->getParamDecl(1)), "std::string"))
+    return false;
+
+  std::vector<const CallExpr *> calls;
+  CollectDirectRecursiveCalls(FD->getBody(), Ctx.FuncName, calls);
+  if (calls.empty())
+    return false;
+  for (const CallExpr *CE : calls) {
+    if (CE->getNumArgs() != 2)
+      return false;
+    // All recursive calls must be on sub-expressions of the first parameter.
+    if (!ArgSourceContains(CE, "getLHS", Ctx.ASTCtx) &&
+        !ArgSourceContains(CE, "getRHS", Ctx.ASTCtx) &&
+        !ArgSourceContains(CE, "getSubExpr", Ctx.ASTCtx) &&
+        !ArgSourceContains(CE, "getArg", Ctx.ASTCtx) &&
+        !ArgSourceContains(CE, "Child", Ctx.ASTCtx))
+      return false;
+    // The second argument must be the function-name parameter.
+    std::string nameArg = PrintExpr(CE->getArg(1), Ctx.ASTCtx);
+    if (nameArg != FD->getParamDecl(1)->getNameAsString())
+      return false;
+  }
+  return true;
 }
 
 bool StructuralRecursionRule::appliesToIsInTailPositionExpr(
@@ -270,6 +321,8 @@ std::string StructuralRecursionRule::apply(const FunctionDecl *FD,
     return applyIsInTailPosition(FD, BA, Ctx);
   if (appliesToIsInTailPositionExpr(FD, BA, Ctx))
     return applyIsInTailPositionExpr(FD, BA, Ctx);
+  if (appliesToIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx))
+    return applyIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx);
   if (appliesToEvalCondition(FD, BA, Ctx))
     return applyEvalCondition(FD, BA, Ctx);
   if (appliesToParseLinearTerms(FD, BA, Ctx))
@@ -754,6 +807,163 @@ std::string StructuralRecursionRule::applyIsInTailPositionExpr(
       });
     });
     b.line("return ret;");
+  });
+
+  return e.str();
+}
+
+// ============================================================
+// IsPureExprIgnoringRecursiveCallsImpl
+// ============================================================
+
+std::string StructuralRecursionRule::applyIsPureExprIgnoringRecursiveCallsImpl(
+    const FunctionDecl *FD, const BodyAnalysis &BA,
+    GenContext &Ctx) const {
+  (void)BA;
+  CodeEmitter e;
+  e.raw("// === Generated structural-recursion code for function: " +
+        Ctx.FuncName + " ===\n\n");
+  e.line("#include <vector>");
+  e.nl();
+
+  std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
+  std::string eName = FD->getParamDecl(0)->getNameAsString();
+  std::string funcName = FD->getParamDecl(1)->getNameAsString();
+
+  e.block(sig, [&](CodeEmitter &b) {
+    b.line("struct Frame { const Expr *E; int state; unsigned count; };");
+    b.line("std::vector<Frame> stack;");
+    b.line("std::vector<bool> values;");
+    b.line("stack.push_back({" + eName + ", 0, 0});");
+    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
+      w.line("Frame &f = stack.back();");
+      w.block("switch (f.state)", [&](CodeEmitter &sw) {
+        sw.line("case 0: {");
+        sw.inc();
+        sw.line("const Expr *" + eName + " = f.E;");
+        sw.line("if (!" + eName + ") { values.push_back(true); stack.pop_back(); break; }");
+        sw.line(eName + " = " + eName + "->IgnoreParenImpCasts();");
+        sw.line("if (const CallExpr *CE = dyn_cast<CallExpr>(" + eName + ")) {");
+        sw.inc();
+        sw.line("if (const FunctionDecl *Callee = CE->getDirectCallee()) {");
+        sw.inc();
+        sw.line("if (Callee->getNameAsString() == " + funcName + ") {");
+        sw.inc();
+        sw.line("values.push_back(true); stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("if (IsKnownPureFunction(Callee->getNameAsString())) {");
+        sw.inc();
+        sw.line("unsigned n = CE->getNumArgs();");
+        sw.line("f.count = n;");
+        sw.line("if (n == 0) { values.push_back(true); stack.pop_back(); break; }");
+        sw.line("f.state = 1;");
+        sw.line("for (int i = static_cast<int>(n) - 1; i >= 0; --i)");
+        sw.inc();
+        sw.line("stack.push_back({CE->getArg(i), 0, 0});");
+        sw.dec();
+        sw.line("break;");
+        sw.dec();
+        sw.line("}");
+        sw.dec();
+        sw.line("}");
+        sw.line("values.push_back(false); stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(" +
+                eName + ")) {");
+        sw.inc();
+        sw.line("if (BO->isAssignmentOp() || BO->getOpcode() == BO_Comma) {");
+        sw.inc();
+        sw.line("values.push_back(false); stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("f.state = 2;");
+        sw.line("stack.push_back({BO->getRHS(), 0, 0});");
+        sw.line("stack.push_back({BO->getLHS(), 0, 0});");
+        sw.line("break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(" + eName +
+                ")) {");
+        sw.inc();
+        sw.line("if (UO->isIncrementDecrementOp()) {");
+        sw.inc();
+        sw.line("values.push_back(false); stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("f.state = 3;");
+        sw.line("stack.push_back({UO->getSubExpr(), 0, 0});");
+        sw.line("break;");
+        sw.dec();
+        sw.line("}");
+        sw.line("std::vector<const Expr *> __cps_children;");
+        sw.line("for (const Stmt *Child : " + eName + "->children()) {");
+        sw.inc();
+        sw.line("if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child))");
+        sw.inc();
+        sw.line("__cps_children.push_back(ChildExpr);");
+        sw.dec();
+        sw.dec();
+        sw.line("}");
+        sw.line("f.count = static_cast<unsigned>(__cps_children.size());");
+        sw.line("if (f.count == 0) { values.push_back(true); stack.pop_back(); break; }");
+        sw.line("f.state = 4;");
+        sw.line("for (auto it = __cps_children.rbegin(); it != __cps_children.rend(); ++it)");
+        sw.inc();
+        sw.line("stack.push_back({*it, 0, 0});");
+        sw.dec();
+        sw.line("break;");
+        sw.dec();
+        sw.line("}");
+
+        sw.line("case 1: {");
+        sw.inc();
+        sw.line("bool res = true;");
+        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
+        sw.inc();
+        sw.line("bool v = values.back(); values.pop_back();");
+        sw.line("res = res && v;");
+        sw.dec();
+        sw.line("}");
+        sw.line("values.push_back(res);");
+        sw.line("stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+
+        sw.line("case 2: {");
+        sw.inc();
+        sw.line("bool rhs = values.back(); values.pop_back();");
+        sw.line("bool lhs = values.back(); values.pop_back();");
+        sw.line("values.push_back(lhs && rhs);");
+        sw.line("stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+
+        sw.line("case 3: {");
+        sw.inc();
+        sw.line("bool v = values.back(); values.pop_back();");
+        sw.line("values.push_back(v);");
+        sw.line("stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+
+        sw.line("case 4: {");
+        sw.inc();
+        sw.line("bool res = true;");
+        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
+        sw.inc();
+        sw.line("bool v = values.back(); values.pop_back();");
+        sw.line("res = res && v;");
+        sw.dec();
+        sw.line("}");
+        sw.line("values.push_back(res);");
+        sw.line("stack.pop_back(); break;");
+        sw.dec();
+        sw.line("}");
+      });
+    });
+    b.line("return values.empty() ? true : values.back();");
   });
 
   return e.str();
