@@ -141,6 +141,19 @@ private:
                                     GenContext &Ctx) const;
 };
 
+// String structural recursion: explicit-stack state machine for
+// PrintExprWithReplacements-like helpers that return std::string and recurse
+// on sub-expressions of the first parameter.
+class StringStructuralRecursionRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
 // Create the default ordered list of transformation rules.
 // Rules are tried in order; the first one that applies wins.
 std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules();
