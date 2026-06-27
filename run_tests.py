@@ -960,6 +960,47 @@ int main() {
         ],
     },
     {
+        "name": "is_pure_expr_original",
+        "input": "tests/test_input_is_pure_expr.cc",
+        "preamble": "#include <string>\n\nstruct FunctionDecl {\n  std::string Name;\n  bool IsConst;\n  FunctionDecl(const std::string &N, bool C = false) : Name(N), IsConst(C) {}\n  std::string getNameAsString() const { return Name; }\n  bool isConst() const { return IsConst; }\n};\n\nstruct StmtRange;\n\nstruct Stmt {\n  virtual ~Stmt() = default;\n  virtual StmtRange children() const;\n};\n\nenum Opcode {\n  BO_Add,\n  BO_Sub,\n  BO_Comma,\n  BO_Assign\n};\n\nenum UOpcode {\n  UO_LNot,\n  UO_PreInc,\n  UO_PreDec,\n  UO_PostInc,\n  UO_PostDec\n};\n\nstruct StmtRange {\n  static constexpr int Max = 16;\n  Stmt *Items[Max];\n  int Size;\n  StmtRange() : Size(0) {}\n  void push_back(Stmt *S) { Items[Size++] = S; }\n\n  Stmt **begin() { return Items; }\n  Stmt **end() { return Items + Size; }\n  Stmt *const *begin() const { return Items; }\n  Stmt *const *end() const { return Items + Size; }\n\n  struct RevIt {\n    Stmt **P;\n    Stmt *&operator*() { return *(P - 1); }\n    RevIt &operator++() { --P; return *this; }\n    bool operator!=(const RevIt &O) const { return P != O.P; }\n  };\n  struct ConstRevIt {\n    Stmt *const *P;\n    Stmt *const &operator*() { return *(P - 1); }\n    ConstRevIt &operator++() { --P; return *this; }\n    bool operator!=(const ConstRevIt &O) const { return P != O.P; }\n  };\n  RevIt rbegin() { return RevIt{Items + Size}; }\n  RevIt rend() { return RevIt{Items}; }\n  ConstRevIt rbegin() const { return ConstRevIt{Items + Size}; }\n  ConstRevIt rend() const { return ConstRevIt{Items}; }\n};\n\nStmtRange Stmt::children() const { return StmtRange(); }\n\nstruct Expr : Stmt {\n  virtual const Expr *IgnoreParenImpCasts() const { return this; }\n  virtual StmtRange children() const override { return StmtRange(); }\n};\n\nstruct CallExpr : Expr {\n  FunctionDecl *Callee;\n  StmtRange Args;\n  CallExpr(FunctionDecl *C) : Callee(C) {}\n  void addArg(Expr *A) { Args.push_back(A); }\n  const FunctionDecl *getDirectCallee() const { return Callee; }\n  StmtRange children() const override {\n    StmtRange R;\n    for (Stmt *S : Args)\n      R.push_back(S);\n    return R;\n  }\n};\n\nstruct BinaryOperator : Expr {\n  Opcode Op;\n  Expr *LHS;\n  Expr *RHS;\n  BinaryOperator(Opcode O, Expr *L, Expr *R) : Op(O), LHS(L), RHS(R) {}\n  Opcode getOpcode() const { return Op; }\n  bool isAssignmentOp() const { return Op == BO_Assign; }\n  const Expr *getLHS() const { return LHS; }\n  const Expr *getRHS() const { return RHS; }\n  StmtRange children() const override {\n    StmtRange R;\n    R.push_back(LHS);\n    R.push_back(RHS);\n    return R;\n  }\n};\n\nstruct UnaryOperator : Expr {\n  UOpcode Op;\n  Expr *Sub;\n  UnaryOperator(UOpcode O, Expr *S) : Op(O), Sub(S) {}\n  UOpcode getOpcode() const { return Op; }\n  bool isIncrementDecrementOp() const {\n    return Op == UO_PreInc || Op == UO_PreDec ||\n           Op == UO_PostInc || Op == UO_PostDec;\n  }\n  const Expr *getSubExpr() const { return Sub; }\n  StmtRange children() const override {\n    StmtRange R;\n    R.push_back(Sub);\n    return R;\n  }\n};\n\ntemplate <typename T, typename U>\nconst T *dyn_cast(const U *P) {\n  return dynamic_cast<const T *>(P);\n}\n\ntemplate <typename T, typename U>\nconst T *dyn_cast_or_null(const U *P) {\n  return P ? dynamic_cast<const T *>(P) : nullptr;\n}\n",
+        "main": """
+#include <iostream>
+int main() {
+  FunctionDecl pureFn("pure", true);
+  FunctionDecl impureFn("impure", false);
+  Expr leaf;
+  CallExpr pureCall(&pureFn);
+  pureCall.addArg(&leaf);
+  CallExpr impureCall(&impureFn);
+  impureCall.addArg(&leaf);
+  BinaryOperator assign(BO_Assign, &leaf, &leaf);
+  BinaryOperator add(BO_Add, &leaf, &leaf);
+  BinaryOperator addAssign(BO_Add, &leaf, &assign);
+  UnaryOperator inc(UO_PreInc, &leaf);
+  BinaryOperator comma(BO_Comma, &leaf, &leaf);
+  std::cout << "leaf = " << IsPureExprImpl(&leaf) << std::endl;
+  std::cout << "pureCall = " << IsPureExprImpl(&pureCall) << std::endl;
+  std::cout << "impureCall = " << IsPureExprImpl(&impureCall) << std::endl;
+  std::cout << "assign = " << IsPureExprImpl(&assign) << std::endl;
+  std::cout << "add = " << IsPureExprImpl(&add) << std::endl;
+  std::cout << "addAssign = " << IsPureExprImpl(&addAssign) << std::endl;
+  std::cout << "inc = " << IsPureExprImpl(&inc) << std::endl;
+  std::cout << "comma = " << IsPureExprImpl(&comma) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "leaf = 1",
+            "pureCall = 1",
+            "impureCall = 0",
+            "assign = 0",
+            "add = 1",
+            "addAssign = 0",
+            "inc = 0",
+            "comma = 0",
+        ],
+    },
+    {
         "name": "is_tail",
         "input": "tests/test_input_is_tail.cc",
         "preamble": "enum {\n  ST_RETURN,\n  ST_EXPR,\n  ST_IF\n};\n\nstruct Expr {\n  int id;\n};\n\nstruct Stmt {\n  int kind;\n  Expr *ret;\n  Expr *expr;\n  Stmt *then_;\n  Stmt *else_;\n};\n",
@@ -1046,6 +1087,34 @@ int main() {
             "inner_holes = 1",
             "other_holes = 0",
             "null_holes = 0",
+        ],
+    },
+    {
+        "name": "collect_holes_deep_original",
+        "input": "tests/test_input_collect_holes_deep.cc",
+        "preamble": "#include <string>\n#include <vector>\n\nstruct FunctionDecl {\n  std::string Name;\n  FunctionDecl(const std::string &N) : Name(N) {}\n  std::string getNameAsString() const { return Name; }\n};\n\nstruct Stmt {\n  virtual ~Stmt() = default;\n};\n\nstruct StmtRange {\n  static constexpr int Max = 16;\n  Stmt *Items[Max];\n  int Size;\n  StmtRange() : Size(0) {}\n  void push_back(Stmt *S) { Items[Size++] = S; }\n\n  Stmt **begin() { return Items; }\n  Stmt **end() { return Items + Size; }\n  Stmt *const *begin() const { return Items; }\n  Stmt *const *end() const { return Items + Size; }\n\n  struct RevIt {\n    Stmt **P;\n    Stmt *&operator*() { return *(P - 1); }\n    RevIt &operator++() { --P; return *this; }\n    bool operator!=(const RevIt &O) const { return P != O.P; }\n  };\n  struct ConstRevIt {\n    Stmt *const *P;\n    Stmt *const &operator*() { return *(P - 1); }\n    ConstRevIt &operator++() { --P; return *this; }\n    bool operator!=(const ConstRevIt &O) const { return P != O.P; }\n  };\n  RevIt rbegin() { return RevIt{Items + Size}; }\n  RevIt rend() { return RevIt{Items}; }\n  ConstRevIt rbegin() const { return ConstRevIt{Items + Size}; }\n  ConstRevIt rend() const { return ConstRevIt{Items}; }\n};\n\nstruct Expr : Stmt {\n  virtual StmtRange children() const { return StmtRange(); }\n};\n\nstruct CallExpr : Expr {\n  FunctionDecl *Callee;\n  StmtRange Args;\n  CallExpr(FunctionDecl *C) : Callee(C) {}\n  void addArg(Expr *A) { Args.push_back(A); }\n  const FunctionDecl *getDirectCallee() const { return Callee; }\n  StmtRange children() const override {\n    StmtRange R;\n    for (Stmt *S : Args)\n      R.push_back(S);\n    return R;\n  }\n};\n\ntemplate <typename T, typename U>\nconst T *dyn_cast(const U *P) {\n  return dynamic_cast<const T *>(P);\n}\n\ntemplate <typename T, typename U>\nconst T *dyn_cast_or_null(const U *P) {\n  return P ? dynamic_cast<const T *>(P) : nullptr;\n}\n",
+        "main": """
+#include <iostream>
+int main() {
+  FunctionDecl target("target"), other("other");
+  Expr leaf1, leaf2;
+  CallExpr arg1(&target); arg1.addArg(&leaf1);
+  CallExpr arg2(&target); arg2.addArg(&leaf2);
+  CallExpr root(&other); root.addArg(&arg1); root.addArg(&arg2);
+  std::vector<CallExpr *> holes;
+  CollectHolesDeep(&root, "target", holes);
+  std::cout << "count = " << holes.size() << std::endl;
+  std::cout << "order_ok = " << (holes.size() == 2 && holes[0] == &arg1 && holes[1] == &arg2 ? 1 : 0) << std::endl;
+  std::vector<CallExpr *> empty;
+  CollectHolesDeep(nullptr, "target", empty);
+  std::cout << "null_count = " << empty.size() << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "count = 2",
+            "order_ok = 1",
+            "null_count = 0",
         ],
     },
     {
@@ -1194,6 +1263,371 @@ int main() {
             "hole[2] = 4",
             "hole[3] = 5",
             "hole[4] = 3",
+        ],
+    },
+    {
+        "name": "is_in_tail_position_original",
+        "input": "tests/test_input_is_in_tail_position.cc",
+        "preamble": """
+#include <string>
+#include <vector>
+#include <iostream>
+
+enum Opcode { BO_LAnd, BO_LOr };
+
+struct Stmt { virtual ~Stmt() = default; };
+struct Expr : Stmt { virtual const Expr *IgnoreParenImpCasts() const { return this; } };
+
+struct FunctionDecl {
+  std::string Name;
+  FunctionDecl(const std::string &N) : Name(N) {}
+  std::string getNameAsString() const { return Name; }
+};
+
+struct ReturnStmt : Stmt {
+  const Expr *Ret;
+  ReturnStmt(const Expr *R) : Ret(R) {}
+  const Expr *getRetValue() const { return Ret; }
+};
+
+struct IfStmt : Stmt {
+  const Expr *Cond;
+  const Stmt *Then_;
+  const Stmt *Else_;
+  IfStmt(const Expr *C, const Stmt *T, const Stmt *E = nullptr)
+      : Cond(C), Then_(T), Else_(E) {}
+  const Expr *getCond() const { return Cond; }
+  const Stmt *getThen() const { return Then_; }
+  const Stmt *getElse() const { return Else_; }
+};
+
+struct CompoundStmt : Stmt {
+  std::vector<const Stmt *> Body;
+  void addChild(const Stmt *S) { Body.push_back(S); }
+  bool body_empty() const { return Body.empty(); }
+  const Stmt *body_back() const { return Body.back(); }
+};
+
+struct BinaryOperator : Expr {
+  Opcode Op;
+  Expr *LHS;
+  Expr *RHS;
+  BinaryOperator(Opcode O, Expr *L, Expr *R) : Op(O), LHS(L), RHS(R) {}
+  Opcode getOpcode() const { return Op; }
+  const Expr *getLHS() const { return LHS; }
+  const Expr *getRHS() const { return RHS; }
+};
+
+struct CallExpr : Expr {
+  FunctionDecl *Callee;
+  std::vector<Expr *> Args;
+  CallExpr(FunctionDecl *C) : Callee(C) {}
+  void addArg(Expr *A) { Args.push_back(A); }
+  const FunctionDecl *getDirectCallee() const { return Callee; }
+  unsigned getNumArgs() const { return static_cast<unsigned>(Args.size()); }
+  const Expr *getArg(unsigned I) const { return Args[I]; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+#include <iostream>
+int main() {
+  FunctionDecl target("target");
+  FunctionDecl other("other");
+  Expr cond;
+  BinaryOperator land(BO_LAnd, &cond, &cond);
+
+  CallExpr targetCall(&target);
+  ReturnStmt rs1(&targetCall);
+  std::cout << "tail_target = " << IsInTailPosition(&rs1, &target) << std::endl;
+
+  CallExpr otherCall(&other);
+  ReturnStmt rs2(&otherCall);
+  std::cout << "tail_other = " << IsInTailPosition(&rs2, &target) << std::endl;
+
+  CallExpr tc2(&target);
+  ReturnStmt rs_then(&tc2), rs_else(&tc2);
+  IfStmt if1(&land, &rs_then, &rs_else);
+  std::cout << "tail_if_both = " << IsInTailPosition(&if1, &target) << std::endl;
+
+  ReturnStmt rs_then2(&otherCall);
+  IfStmt if2(&land, &rs_then2, &rs_else);
+  std::cout << "tail_if_mixed = " << IsInTailPosition(&if2, &target) << std::endl;
+
+  CompoundStmt cs;
+  cs.addChild(&rs2);
+  cs.addChild(&rs1);
+  std::cout << "tail_compound = " << IsInTailPosition(&cs, &target) << std::endl;
+
+  std::cout << "tail_null = " << IsInTailPosition(nullptr, &target) << std::endl;
+
+  ReturnStmt rs_empty(nullptr);
+  std::cout << "tail_empty_return = " << IsInTailPosition(&rs_empty, &target) << std::endl;
+
+  return 0;
+}
+""",
+        "expected": [
+            "tail_target = 1",
+            "tail_other = 0",
+            "tail_if_both = 1",
+            "tail_if_mixed = 0",
+            "tail_compound = 1",
+            "tail_null = 0",
+            "tail_empty_return = 0",
+        ],
+    },
+    {
+        "name": "eval_condition_original",
+        "input": "tests/test_input_eval_condition.cc",
+        "preamble": """
+#include <string>
+#include <vector>
+#include <iostream>
+
+enum Opcode { BO_LAnd, BO_LOr, BO_EQ, BO_NE, BO_LT, BO_GT, BO_LE, BO_GE, BO_Add };
+enum UOpcode { UO_LNot };
+
+struct Stmt { virtual ~Stmt() = default; };
+struct Expr : Stmt { virtual const Expr *IgnoreParenImpCasts() const { return this; } };
+
+struct ValueDecl {
+  std::string Name;
+  ValueDecl(const std::string &N) : Name(N) {}
+  std::string getNameAsString() const { return Name; }
+};
+
+struct DeclRefExpr : Expr {
+  const ValueDecl *Decl_;
+  DeclRefExpr(const ValueDecl *D) : Decl_(D) {}
+  const ValueDecl *getDecl() const { return Decl_; }
+};
+
+struct APInt {
+  long long V;
+  APInt(long long v) : V(v) {}
+  long long getSExtValue() const { return V; }
+};
+
+struct IntegerLiteral : Expr {
+  APInt V;
+  IntegerLiteral(long long v) : V(v) {}
+  const APInt &getValue() const { return V; }
+};
+
+struct BinaryOperator : Expr {
+  Opcode Op;
+  Expr *LHS;
+  Expr *RHS;
+  BinaryOperator(Opcode O, Expr *L, Expr *R) : Op(O), LHS(L), RHS(R) {}
+  Opcode getOpcode() const { return Op; }
+  const Expr *getLHS() const { return LHS; }
+  const Expr *getRHS() const { return RHS; }
+};
+
+struct UnaryOperator : Expr {
+  UOpcode Op;
+  Expr *Sub;
+  UnaryOperator(UOpcode O, Expr *S) : Op(O), Sub(S) {}
+  UOpcode getOpcode() const { return Op; }
+  const Expr *getSubExpr() const { return Sub; }
+};
+
+enum class EvalResult { True, False, Unknown };
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+
+bool ExtractParamOrLiteral(const Expr *E, const std::string &ParamName,
+                           int ParamValue, int &Out) {
+  E = E->IgnoreParenImpCasts();
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+    if (DRE->getDecl()->getNameAsString() == ParamName) {
+      Out = ParamValue;
+      return true;
+    }
+  }
+  if (const IntegerLiteral *IL = dyn_cast<IntegerLiteral>(E)) {
+    Out = static_cast<int>(IL->getValue().getSExtValue());
+    return true;
+  }
+  return false;
+}
+""",
+        "main": """
+#include <iostream>
+int val(const EvalResult &r) {
+  return r == EvalResult::True ? 1 : (r == EvalResult::False ? 0 : -1);
+}
+int main() {
+  std::string param = "n";
+  ValueDecl nDecl("n");
+  IntegerLiteral five(5), three(3);
+  DeclRefExpr nRef(&nDecl);
+
+  BinaryOperator eq(BO_EQ, &nRef, &five);
+  BinaryOperator ne(BO_NE, &nRef, &five);
+  BinaryOperator lt(BO_LT, &nRef, &five);
+  BinaryOperator gt(BO_GT, &nRef, &three);
+  BinaryOperator le(BO_LE, &nRef, &five);
+  BinaryOperator ge(BO_GE, &nRef, &five);
+  BinaryOperator land(BO_LAnd, &eq, &gt);
+  BinaryOperator lor(BO_LOr, &ne, &lt);
+  UnaryOperator lnot(UO_LNot, &eq);
+  BinaryOperator add(BO_Add, &nRef, &five);
+
+  std::cout << "eq=" << val(EvalConditionForParam(&eq, param, 5)) << std::endl;
+  std::cout << "ne=" << val(EvalConditionForParam(&ne, param, 5)) << std::endl;
+  std::cout << "lt=" << val(EvalConditionForParam(&lt, param, 5)) << std::endl;
+  std::cout << "gt=" << val(EvalConditionForParam(&gt, param, 5)) << std::endl;
+  std::cout << "le=" << val(EvalConditionForParam(&le, param, 5)) << std::endl;
+  std::cout << "ge=" << val(EvalConditionForParam(&ge, param, 5)) << std::endl;
+  std::cout << "land=" << val(EvalConditionForParam(&land, param, 5)) << std::endl;
+  std::cout << "lor=" << val(EvalConditionForParam(&lor, param, 5)) << std::endl;
+  std::cout << "lnot=" << val(EvalConditionForParam(&lnot, param, 5)) << std::endl;
+  std::cout << "unknown=" << val(EvalConditionForParam(&add, param, 5)) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "eq=1",
+            "ne=0",
+            "lt=0",
+            "gt=1",
+            "le=1",
+            "ge=1",
+            "land=1",
+            "lor=0",
+            "lnot=0",
+            "unknown=-1",
+        ],
+    },
+    {
+        "name": "parse_linear_terms_original",
+        "input": "tests/test_input_parse_linear_terms.cc",
+        "preamble": """
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+
+enum Opcode { BO_Add, BO_Sub };
+enum UOpcode { UO_Minus };
+
+struct Stmt { virtual ~Stmt() = default; };
+struct Expr : Stmt { virtual const Expr *IgnoreParenImpCasts() const { return this; } };
+
+struct ValueDecl {
+  std::string Name;
+  ValueDecl(const std::string &N) : Name(N) {}
+  std::string getNameAsString() const { return Name; }
+};
+struct FunctionDecl : ValueDecl {
+  FunctionDecl(const std::string &N) : ValueDecl(N) {}
+};
+
+struct DeclRefExpr : Expr {
+  const ValueDecl *Decl_;
+  DeclRefExpr(const ValueDecl *D) : Decl_(D) {}
+  const ValueDecl *getDecl() const { return Decl_; }
+};
+
+struct APInt {
+  long long V;
+  APInt(long long v) : V(v) {}
+  long long getSExtValue() const { return V; }
+};
+struct IntegerLiteral : Expr {
+  APInt V;
+  IntegerLiteral(long long v) : V(v) {}
+  const APInt &getValue() const { return V; }
+};
+
+struct BinaryOperator : Expr {
+  Opcode Op;
+  Expr *LHS;
+  Expr *RHS;
+  BinaryOperator(Opcode O, Expr *L, Expr *R) : Op(O), LHS(L), RHS(R) {}
+  Opcode getOpcode() const { return Op; }
+  const Expr *getLHS() const { return LHS; }
+  const Expr *getRHS() const { return RHS; }
+};
+
+struct UnaryOperator : Expr {
+  UOpcode Op;
+  Expr *Sub;
+  UnaryOperator(UOpcode O, Expr *S) : Op(O), Sub(S) {}
+  UOpcode getOpcode() const { return Op; }
+  const Expr *getSubExpr() const { return Sub; }
+};
+
+struct CallExpr : Expr {
+  FunctionDecl *Callee;
+  std::vector<Expr *> Args;
+  CallExpr(FunctionDecl *C) : Callee(C) {}
+  void addArg(Expr *A) { Args.push_back(A); }
+  const FunctionDecl *getDirectCallee() const { return Callee; }
+  unsigned getNumArgs() const { return static_cast<unsigned>(Args.size()); }
+  const Expr *getArg(unsigned I) const { return Args[I]; }
+};
+
+struct LinearTerm { int Order; int Sign; CallExpr *Hole; };
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+#include <iostream>
+int main() {
+  std::string func = "f";
+  std::string param = "n";
+  ValueDecl nDecl("n");
+  DeclRefExpr nRef(&nDecl);
+  FunctionDecl fDecl("f");
+
+  auto makeF = [&](int k) -> CallExpr * {
+    IntegerLiteral *ik = new IntegerLiteral(k);
+    BinaryOperator *sub = new BinaryOperator(BO_Sub, &nRef, ik);
+    CallExpr *call = new CallExpr(&fDecl);
+    call->addArg(sub);
+    return call;
+  };
+
+  CallExpr *f1 = makeF(1);
+  std::vector<LinearTerm> terms;
+  int maxOrder = 0;
+  bool ok = ParseLinearTerms(f1, func, param, terms, maxOrder);
+  std::cout << "single_ok=" << ok << " max=" << maxOrder << " terms=" << terms.size() << std::endl;
+
+  CallExpr *f2 = makeF(2);
+  CallExpr *f3 = makeF(3);
+  BinaryOperator *sub1 = new BinaryOperator(BO_Sub, f1, f2);
+  BinaryOperator *expr = new BinaryOperator(BO_Add, sub1, f3);
+  terms.clear(); maxOrder = 0;
+  ok = ParseLinearTerms(expr, func, param, terms, maxOrder);
+  std::cout << "expr_ok=" << ok << " max=" << maxOrder;
+  for (size_t i = 0; i < terms.size(); ++i)
+    std::cout << " [" << terms[i].Order << "," << terms[i].Sign << "]";
+  std::cout << std::endl;
+
+  BinaryOperator *inner = new BinaryOperator(BO_Sub, f1, f2);
+  UnaryOperator *neg = new UnaryOperator(UO_Minus, inner);
+  terms.clear(); maxOrder = 0;
+  ok = ParseLinearTerms(neg, func, param, terms, maxOrder);
+  std::cout << "neg_ok=" << ok << " max=" << maxOrder;
+  for (size_t i = 0; i < terms.size(); ++i)
+    std::cout << " [" << terms[i].Order << "," << terms[i].Sign << "]";
+  std::cout << std::endl;
+
+  return 0;
+}
+""",
+        "expected": [
+            "single_ok=1 max=1 terms=1",
+            "expr_ok=1 max=3 [1,1] [2,-1] [3,1]",
+            "neg_ok=1 max=2 [1,-1] [2,1]",
         ],
     },
 ]

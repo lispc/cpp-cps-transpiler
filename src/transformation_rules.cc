@@ -10,6 +10,7 @@ std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules() {
   rules.emplace_back(std::make_unique<MemoizationRule>());
   rules.emplace_back(std::make_unique<BinaryStackRule>());
   rules.emplace_back(std::make_unique<TreeTraversalRule>());
+  rules.emplace_back(std::make_unique<StructuralRecursionRule>());
   rules.emplace_back(std::make_unique<GenericStackRule>());
   rules.emplace_back(std::make_unique<DefunctionalizedRule>());
   return rules;

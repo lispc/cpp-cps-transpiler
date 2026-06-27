@@ -289,24 +289,48 @@ std::string EmitFrameStruct(CodeEmitter &e, const FunctionDecl *FD,
 
 namespace {
 
-const Expr *ExtractReturnExpr(const Stmt *S) {
-  if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S))
-    return RS->getRetValue();
+namespace {
+
+// Unwrap a single-statement CompoundStmt, or return the last statement of a
+// multi-statement CompoundStmt.  This lets base-case detection find the
+// trailing return inside compound if-branches such as those in the helper
+// functions IsInTailPosition, EvalConditionForParam, and ParseLinearTerms.
+const Stmt *UnwrapTrailingStmt(const Stmt *S) {
   if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
-    if (CS->size() == 1)
-      return ExtractReturnExpr(CS->body_begin()[0]);
+    if (CS->body_empty())
+      return nullptr;
+    const Stmt *Last = nullptr;
+    for (const Stmt *B : CS->body())
+      Last = B;
+    return UnwrapTrailingStmt(Last);
   }
+  if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+    // An if-without-else is just a guarded block; the trailing statement of
+    // its then-branch is what matters for base-case detection.
+    if (IfS->getElse())
+      return S;
+    return UnwrapTrailingStmt(IfS->getThen());
+  }
+  return S;
+}
+
+} // anonymous namespace
+
+const Expr *ExtractReturnExpr(const Stmt *S) {
+  if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(UnwrapTrailingStmt(S)))
+    return RS->getRetValue();
   return nullptr;
 }
 
 bool IsVoidReturn(const Stmt *S) {
-  if (isa<ReturnStmt>(S))
-    return true;
-  if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
-    if (CS->size() == 1)
-      return IsVoidReturn(CS->body_begin()[0]);
-  }
-  return false;
+  return isa<ReturnStmt>(UnwrapTrailingStmt(S));
+}
+
+// True if the statement is (or ends with) a switch statement.
+// Used to accept helper-function base cases such as EvalConditionForParam,
+// where the value differs per case and is not represented by a single Expr.
+bool EndsWithSwitch(const Stmt *S) {
+  return isa<SwitchStmt>(UnwrapTrailingStmt(S));
 }
 
 BaseCase MakeBaseCase(const Expr *Cond, const Expr *Value,
@@ -461,7 +485,11 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA,
       const Expr *BaseExpr = ExtractReturnExpr(IfS->getThen());
       // A void base case "if (cond) return;" has no value expression and is
       // valid for void functions; non-void functions require a return value.
-      if (!BaseExpr && !IsVoidReturn(IfS->getThen()))
+      // We also allow branches that end in a switch of returns (e.g.
+      // EvalConditionForParam), treating them as base cases with no single
+      // value expression.
+      if (!BaseExpr && !IsVoidReturn(IfS->getThen()) &&
+          !EndsWithSwitch(IfS->getThen()))
         return false;
       BA.BaseCases.push_back(MakeBaseCase(IfS->getCond(), BaseExpr, Ctx));
       if (const Stmt *Else = IfS->getElse()) {

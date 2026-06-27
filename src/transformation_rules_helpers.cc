@@ -6,6 +6,7 @@
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
+#include "clang/AST/ExprCXX.h"
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -246,12 +247,115 @@ const Stmt *GetLoopBody(const Stmt *S) {
   return nullptr;
 }
 
+namespace {
+
+// Walk an IfStmt chain, unwrapping single-statement CompoundStmt wrappers,
+// and return the then-statement of the deepest IfStmt.
+const IfStmt *GetInnermostIfStmt(const IfStmt *IfS) {
+  while (true) {
+    const Stmt *Then = IfS->getThen();
+    if (const IfStmt *Next = dyn_cast<IfStmt>(Then)) {
+      IfS = Next;
+      continue;
+    }
+    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(Then)) {
+      if (CS->size() == 1) {
+        if (const IfStmt *Next = dyn_cast<IfStmt>(*CS->body_begin())) {
+          IfS = Next;
+          continue;
+        }
+      }
+    }
+    break;
+  }
+  return IfS;
+}
+
+const Stmt *GetInnermostThen(const IfStmt *IfS) {
+  return GetInnermostIfStmt(IfS)->getThen();
+}
+
+// If LoopBody is an if-return whose condition is a single recursive call
+// (boolean OR) or a logical-not of a single recursive call (boolean AND),
+// return the IfStmt and set OutIsAnd / OutRecCall.  The then-branch must be a
+// return of the matching boolean literal (true for OR, false for AND).
+const IfStmt *FindBooleanAllAnyIf(const Stmt *LoopBody,
+                                  const std::string &FuncName,
+                                  bool &OutIsAnd,
+                                  CallExpr *&OutRecCall) {
+  const IfStmt *IfS = dyn_cast<IfStmt>(LoopBody);
+  if (!IfS) {
+    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(LoopBody)) {
+      if (CS->size() == 1)
+        IfS = dyn_cast<IfStmt>(*CS->body_begin());
+    }
+  }
+  if (!IfS)
+    return nullptr;
+
+  const ReturnStmt *RS = dyn_cast<ReturnStmt>(IfS->getThen());
+  if (!RS)
+    return nullptr;
+  const Expr *Ret = RS->getRetValue();
+  if (!Ret)
+    return nullptr;
+  const CXXBoolLiteralExpr *BLE =
+      dyn_cast<CXXBoolLiteralExpr>(Ret->IgnoreParenImpCasts());
+  if (!BLE)
+    return nullptr;
+
+  const Expr *Cond = IfS->getCond()->IgnoreParenImpCasts();
+
+  // AND: if (!rec(...)) return false;
+  if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(Cond)) {
+    if (UO->getOpcode() == UO_LNot) {
+      const Expr *Sub = UO->getSubExpr()->IgnoreParenImpCasts();
+      if (const CallExpr *CE = dyn_cast<CallExpr>(Sub)) {
+        if (IsDirectRecursiveCall(CE, FuncName)) {
+          if (!BLE->getValue()) {
+            OutIsAnd = true;
+            OutRecCall = const_cast<CallExpr *>(CE);
+            return IfS;
+          }
+        }
+      }
+    }
+  }
+
+  // OR: if (rec(...)) return true;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Cond)) {
+    if (IsDirectRecursiveCall(CE, FuncName)) {
+      if (BLE->getValue()) {
+        OutIsAnd = false;
+        OutRecCall = const_cast<CallExpr *>(CE);
+        return IfS;
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+} // anonymous namespace
+
 bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
                           const Stmt *&OutLoop, const IfStmt *&OutRecIf,
-                          CallExpr *&OutRecCall, bool IsVoid) {
+                          CallExpr *&OutRecCall, bool IsVoid,
+                          const IfStmt **OutPostLoopIf,
+                          const Stmt **OutPostLoopAction,
+                          bool *OutIsBoolAllAny,
+                          bool *OutIsAnd) {
   OutLoop = nullptr;
   OutRecIf = nullptr;
   OutRecCall = nullptr;
+  if (OutPostLoopIf)
+    *OutPostLoopIf = nullptr;
+  if (OutPostLoopAction)
+    *OutPostLoopAction = nullptr;
+  if (OutIsBoolAllAny)
+    *OutIsBoolAllAny = false;
+  if (OutIsAnd)
+    *OutIsAnd = false;
   if (!CS || CS->body_empty())
     return false;
 
@@ -266,7 +370,11 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
   if (!OutLoop)
     return false;
 
-  // Everything before the loop must be recursion-free.
+  // Everything before the loop must be recursion-free, except for a single
+  // leading IfStmt that performs a post-order action after recursing on
+  // arguments (e.g., the original CollectHolesDeep).
+  const IfStmt *PostLoopIf = nullptr;
+  const Stmt *PostLoopAction = nullptr;
   bool beforeLoop = true;
   bool seenReturnAfterLoop = false;
   for (const Stmt *S : CS->body()) {
@@ -277,8 +385,53 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
     if (beforeLoop) {
       std::vector<CallExpr *> callsInStmt;
       CollectRecursiveCallsInStmt(S, FuncName, callsInStmt);
-      if (!callsInStmt.empty())
-        return false;
+      if (!callsInStmt.empty()) {
+        // We only allow one recursive leading IfStmt.
+        if (PostLoopIf)
+          return false;
+        const IfStmt *IfS = dyn_cast<IfStmt>(S);
+        if (!IfS)
+          return false;
+
+        const Stmt *InnerThen = GetInnermostThen(IfS);
+        const CompoundStmt *InnerCS = dyn_cast<CompoundStmt>(InnerThen);
+        if (!InnerCS || InnerCS->body_empty())
+          return false;
+
+        // All recursion in this leading statement must be inside the innermost
+        // then-block.
+        std::vector<CallExpr *> callsInInner;
+        CollectRecursiveCallsInStmt(InnerCS, FuncName, callsInInner);
+        if (callsInInner.empty() ||
+            callsInInner.size() != callsInStmt.size())
+          return false;
+
+        // The innermost then-block must end with a return, preceded by a
+        // recursion-free statement that becomes the post-loop action.
+        const Stmt *Last = nullptr;
+        for (const Stmt *B : InnerCS->body())
+          Last = B;
+        if (!isa<ReturnStmt>(Last))
+          return false;
+
+        const Stmt *PreRet = nullptr;
+        size_t idx = 0;
+        for (const Stmt *B : InnerCS->body()) {
+          if (idx + 1 == InnerCS->size())
+            break;
+          PreRet = B;
+          ++idx;
+        }
+        if (!PreRet)
+          return false;
+        std::vector<CallExpr *> callsInPreRet;
+        CollectRecursiveCallsInStmt(PreRet, FuncName, callsInPreRet);
+        if (!callsInPreRet.empty())
+          return false;
+
+        PostLoopIf = IfS;
+        PostLoopAction = PreRet;
+      }
     } else {
       // After the loop we allow at most one final return. For void functions
       // any recursion-free tail statements are also allowed.
@@ -292,6 +445,11 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
     }
   }
 
+  if (OutPostLoopIf)
+    *OutPostLoopIf = PostLoopIf;
+  if (OutPostLoopAction)
+    *OutPostLoopAction = PostLoopAction;
+
   const Stmt *LoopBody = GetLoopBody(OutLoop);
   if (!LoopBody)
     return false;
@@ -301,6 +459,26 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
   CollectRecursiveCallsInStmt(LoopBody, FuncName, calls);
   if (calls.size() != 1)
     return false;
+
+  // Boolean all/any: the loop body is an if-return over a range-based for loop.
+  // AND: if (!rec(...)) return false;   OR: if (rec(...)) return true;
+  // Only supported for CXXForRangeStmt loops because we need to iterate the
+  // range in reverse on the explicit stack.
+  bool boolAllAny = false;
+  bool isAnd = false;
+  CallExpr *boolRecCall = nullptr;
+  if (const IfStmt *BoolIf =
+          FindBooleanAllAnyIf(LoopBody, FuncName, isAnd, boolRecCall)) {
+    if (isa<CXXForRangeStmt>(OutLoop)) {
+      OutRecIf = BoolIf;
+      OutRecCall = boolRecCall;
+      if (OutIsBoolAllAny)
+        *OutIsBoolAllAny = true;
+      if (OutIsAnd)
+        *OutIsAnd = isAnd;
+      return true;
+    }
+  }
 
   // Case 1: recursive call is the condition of an if-return.
   OutRecIf = FindRecursiveCallReturnIf(LoopBody, FuncName, OutRecCall);

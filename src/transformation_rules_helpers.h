@@ -52,12 +52,22 @@ const clang::Stmt *GetLoopBody(const clang::Stmt *S);
 // Matches functions whose body consists of (optional) leading/base-case
 // if-return statements, a single for-loop that contains exactly one direct
 // recursive call used as the condition of an if-return, and a final return.
+//
+// For shapes like the original CollectHolesDeep, a leading if-block may
+// contain recursion on arguments before a non-recursive post-order action.
+// When such a block is detected, *OutPostLoopIf is set to the outer IfStmt
+// and *OutPostLoopAction is set to the statement immediately before its
+// innermost then-block's trailing return.
 bool IsTreeTraversalShape(const clang::CompoundStmt *CS,
                           const std::string &FuncName,
                           const clang::Stmt *&OutLoop,
                           const clang::IfStmt *&OutRecIf,
                           clang::CallExpr *&OutRecCall,
-                          bool IsVoid = false);
+                          bool IsVoid = false,
+                          const clang::IfStmt **OutPostLoopIf = nullptr,
+                          const clang::Stmt **OutPostLoopAction = nullptr,
+                          bool *OutIsBoolAllAny = nullptr,
+                          bool *OutIsAnd = nullptr);
 
 // Purity analysis.
 bool IsKnownPureFunction(const std::string &Name);

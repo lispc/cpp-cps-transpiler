@@ -90,6 +90,39 @@ public:
   const char *name() const override;
 };
 
+// Structural recursion: hand-crafted explicit-stack state machines for the
+// helper shapes IsInTailPosition, EvalConditionForParam, and ParseLinearTerms.
+class StructuralRecursionRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+
+private:
+  bool appliesToIsInTailPosition(const clang::FunctionDecl *FD,
+                                 const BodyAnalysis &BA,
+                                 const GenContext &Ctx) const;
+  bool appliesToEvalCondition(const clang::FunctionDecl *FD,
+                              const BodyAnalysis &BA,
+                              const GenContext &Ctx) const;
+  bool appliesToParseLinearTerms(const clang::FunctionDecl *FD,
+                                 const BodyAnalysis &BA,
+                                 const GenContext &Ctx) const;
+
+  std::string applyIsInTailPosition(const clang::FunctionDecl *FD,
+                                    const BodyAnalysis &BA,
+                                    GenContext &Ctx) const;
+  std::string applyEvalCondition(const clang::FunctionDecl *FD,
+                                 const BodyAnalysis &BA,
+                                 GenContext &Ctx) const;
+  std::string applyParseLinearTerms(const clang::FunctionDecl *FD,
+                                    const BodyAnalysis &BA,
+                                    GenContext &Ctx) const;
+};
+
 // Create the default ordered list of transformation rules.
 // Rules are tried in order; the first one that applies wins.
 std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules();
