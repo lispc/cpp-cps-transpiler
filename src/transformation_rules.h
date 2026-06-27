@@ -105,6 +105,9 @@ private:
   bool appliesToIsInTailPosition(const clang::FunctionDecl *FD,
                                  const BodyAnalysis &BA,
                                  const GenContext &Ctx) const;
+  bool appliesToIsInTailPositionExpr(const clang::FunctionDecl *FD,
+                                     const BodyAnalysis &BA,
+                                     const GenContext &Ctx) const;
   bool appliesToEvalCondition(const clang::FunctionDecl *FD,
                               const BodyAnalysis &BA,
                               const GenContext &Ctx) const;
@@ -115,6 +118,9 @@ private:
   std::string applyIsInTailPosition(const clang::FunctionDecl *FD,
                                     const BodyAnalysis &BA,
                                     GenContext &Ctx) const;
+  std::string applyIsInTailPositionExpr(const clang::FunctionDecl *FD,
+                                        const BodyAnalysis &BA,
+                                        GenContext &Ctx) const;
   std::string applyEvalCondition(const clang::FunctionDecl *FD,
                                  const BodyAnalysis &BA,
                                  GenContext &Ctx) const;

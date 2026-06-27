@@ -27,7 +27,12 @@ bool DefunctionalizedRule::applies(const FunctionDecl *FD,
                                    const GenContext &Ctx) const {
   if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
-  return BA.IsRecursive;
+  if (!BA.IsRecursive)
+    return false;
+  // The final recursive expression must actually contain a recursive call.
+  // AnalyzeBody may mark a function recursive even when the extracted RecExpr
+  // is just a constant (e.g. helper functions with recursive if-returns).
+  return ContainsRecursiveCall(BA.RecExpr, Ctx.FuncName);
 }
 
 std::string DefunctionalizedRule::apply(const FunctionDecl *FD,

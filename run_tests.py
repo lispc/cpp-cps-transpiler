@@ -1630,6 +1630,91 @@ int main() {
             "neg_ok=1 max=2 [1,-1] [2,1]",
         ],
     },
+    {
+        "name": "is_in_tail_position_expr_original",
+        "input": "tests/test_input_is_in_tail_position_expr.cc",
+        "preamble": """
+#include <string>
+
+struct Stmt { virtual ~Stmt() = default; };
+struct Expr : Stmt {};
+
+struct ReturnStmt : Stmt {
+  const Expr *Ret;
+  ReturnStmt(const Expr *R) : Ret(R) {}
+  const Expr *getRetValue() const { return Ret; }
+};
+
+struct IfStmt : Stmt {
+  const Expr *Cond;
+  const Stmt *Then_;
+  const Stmt *Else_;
+  IfStmt(const Expr *C, const Stmt *T, const Stmt *E = nullptr)
+      : Cond(C), Then_(T), Else_(E) {}
+  const Stmt *getThen() const { return Then_; }
+  const Stmt *getElse() const { return Else_; }
+};
+
+struct StmtRange {
+  const Stmt *const *Begin;
+  const Stmt *const *End;
+  const Stmt *const *begin() const { return Begin; }
+  const Stmt *const *end() const { return End; }
+};
+
+struct CompoundStmt : Stmt {
+  static constexpr int Max = 16;
+  const Stmt *Items[Max];
+  int Size;
+  CompoundStmt() : Size(0) {}
+  void addChild(const Stmt *S) { Items[Size++] = S; }
+  bool body_empty() const { return Size == 0; }
+  StmtRange body() const { return StmtRange{Items, Items + Size}; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+#include <iostream>
+int main() {
+  Expr target;
+  Expr other;
+  ReturnStmt rs_target(&target);
+  ReturnStmt rs_other(&other);
+  std::cout << "tail_return_target = " << IsInTailPosition(&target, &rs_target, "f") << std::endl;
+  std::cout << "tail_return_other = " << IsInTailPosition(&target, &rs_other, "f") << std::endl;
+  IfStmt if_both(nullptr, &rs_target, &rs_target);
+  std::cout << "tail_if_both = " << IsInTailPosition(&target, &if_both, "f") << std::endl;
+  IfStmt if_mixed(nullptr, &rs_other, &rs_target);
+  std::cout << "tail_if_mixed = " << IsInTailPosition(&target, &if_mixed, "f") << std::endl;
+  IfStmt if_none(nullptr, &rs_other, &rs_other);
+  std::cout << "tail_if_none = " << IsInTailPosition(&target, &if_none, "f") << std::endl;
+  CompoundStmt cs;
+  cs.addChild(&rs_other);
+  cs.addChild(&rs_target);
+  std::cout << "tail_compound = " << IsInTailPosition(&target, &cs, "f") << std::endl;
+  CompoundStmt cs2;
+  cs2.addChild(&rs_target);
+  cs2.addChild(&rs_other);
+  std::cout << "tail_compound2 = " << IsInTailPosition(&target, &cs2, "f") << std::endl;
+  std::cout << "tail_null = " << IsInTailPosition(nullptr, &rs_target, "f") << std::endl;
+  std::cout << "tail_expr = " << IsInTailPosition(&target, &target, "f") << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "tail_return_target = 1",
+            "tail_return_other = 0",
+            "tail_if_both = 1",
+            "tail_if_mixed = 1",
+            "tail_if_none = 0",
+            "tail_compound = 1",
+            "tail_compound2 = 0",
+            "tail_null = 0",
+            "tail_expr = 1",
+        ],
+    },
 ]
 
 
