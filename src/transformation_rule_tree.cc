@@ -136,6 +136,39 @@ std::string NormalizeIndentation(const std::string &S) {
   return result;
 }
 
+const IfStmt *FindCondVarIf(const VarDecl *VD, const Stmt *Root) {
+  if (!VD || !Root)
+    return nullptr;
+  if (const IfStmt *IfS = dyn_cast<IfStmt>(Root)) {
+    if (IfS->getConditionVariable() == VD)
+      return IfS;
+  }
+  for (const Stmt *Child : Root->children()) {
+    if (const IfStmt *Found = FindCondVarIf(VD, Child))
+      return Found;
+  }
+  return nullptr;
+}
+
+// Print an expression, but inline any condition-variable declared by an
+// enclosing if-statement inside LoopBody.  This keeps generated push
+// statements valid when the original recursive call used a variable that was
+// introduced by a cast guard such as "if (const Expr *X = dyn_cast<Expr>(V))".
+std::string GetArgSource(const Expr *E, const Stmt *LoopBody,
+                         const ASTContext *Ctx) {
+  E = E->IgnoreParenImpCasts();
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+    if (const VarDecl *VD = dyn_cast<VarDecl>(DRE->getDecl())) {
+      if (const IfStmt *IfS = FindCondVarIf(VD, LoopBody)) {
+        const Expr *Init = IfS->getConditionVariable()->getInit();
+        if (Init)
+          return PrintExpr(Init, Ctx);
+      }
+    }
+  }
+  return PrintExpr(E, Ctx);
+}
+
 } // anonymous namespace
 
 bool TreeTraversalRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
@@ -182,7 +215,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
         continue;
       if (!s.empty())
         s += ", ";
-      s += PrintExpr(CE->getArg(i), Ctx.ASTCtx);
+      s += GetArgSource(CE->getArg(i), LoopBody, Ctx.ASTCtx);
     }
     return s;
   };
