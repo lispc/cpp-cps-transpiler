@@ -257,6 +257,27 @@ std::string ReplaceParamsWithCur(const std::string &S,
   return result;
 }
 
+std::string ReplaceParamWithLiteral(const std::string &S,
+                                    const std::string &Param,
+                                    const std::string &Literal) {
+  std::string result = S;
+  size_t pos = 0;
+  while ((pos = result.find(Param, pos)) != std::string::npos) {
+    bool leftOK = (pos == 0) ||
+                  (!std::isalnum(result[pos - 1]) && result[pos - 1] != '_');
+    size_t end = pos + Param.length();
+    bool rightOK = (end == result.size()) ||
+                   (!std::isalnum(result[end]) && result[end] != '_');
+    if (leftOK && rightOK) {
+      result.replace(pos, Param.length(), Literal);
+      pos += Literal.length();
+    } else {
+      ++pos;
+    }
+  }
+  return result;
+}
+
 void EmitStmts(CodeEmitter &e, const std::vector<const Stmt *> &Stmts,
                const ASTContext *Ctx) {
   for (const Stmt *S : Stmts) {

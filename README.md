@@ -103,13 +103,13 @@ int fact(int n) {
 
 ```cpp
 int fact(int n) {
-  int acc = 1;
+  int product = 1;
   while (!(n <= 1)) {
-    acc = acc * n;
-    auto new_n = n - 1;
-    n = new_n;
+    product = product * n;
+    auto next_n = n - 1;
+    n = next_n;
   }
-  return acc;
+  return product;
 }
 ```
 
@@ -135,16 +135,8 @@ int fib(int n) {
     return 0;
   }
   std::array<int, 2> vals;
-  {
-    int n = 0;
-    if (n <= 1) vals[0] = n;
-    else vals[0] = 0;
-  }
-  {
-    int n = 1;
-    if (n <= 1) vals[1] = n;
-    else vals[1] = 0;
-  }
+  vals[0] = 0;
+  vals[1] = 1;
   for (int i = 2; i <= n; ++i) {
     int next = (vals[1] + vals[0]);
     for (int j = 0; j < 1; ++j)
@@ -179,14 +171,19 @@ struct min_treeFrame {
   min_treeFrame(int n) : n(n) {}
 };
 
+struct min_treeCombineMarker {
+  int count;
+  min_treeCombineMarker(int c) : count(c) {}
+};
+
 int min_tree(int n) {
-  std::vector<std::variant<min_treeFrame, int>> stack;
+  std::vector<std::variant<min_treeFrame, min_treeCombineMarker>> stack;
   stack.emplace_back(min_treeFrame(n));
   std::vector<int> values;
   while (!stack.empty()) {
     auto entry = stack.back();
     stack.pop_back();
-    if (std::holds_alternative<int>(entry)) {
+    if (std::holds_alternative<min_treeCombineMarker>(entry)) {
       int v0 = values.back(); values.pop_back();
       int v1 = values.back(); values.pop_back();
       values.push_back(std::min(v0, v1));
@@ -198,7 +195,7 @@ int min_tree(int n) {
       else if (n == 1)
         values.push_back(1);
       else {
-        stack.emplace_back(2);
+        stack.emplace_back(min_treeCombineMarker(2));
         stack.emplace_back(min_treeFrame(n - 1));
         stack.emplace_back(min_treeFrame(n - 2));
       }
@@ -209,6 +206,32 @@ int min_tree(int n) {
 ```
 
 完整输出见 [`tests/example_output_*.cc`](tests/)。
+
+### 5. 多 base case 累加器
+
+输入：
+
+```cpp
+int acc_multi_base(int n) {
+  if (n <= 0) return 0;
+  if (n == 1) return 0;
+  return acc_multi_base(n - 1) + n;
+}
+```
+
+输出：
+
+```cpp
+int acc_multi_base(int n) {
+  int sum = 0;
+  while (!(n <= 0) && !(n == 1)) {
+    sum = sum + n;
+    auto next_n = n - 1;
+    n = next_n;
+  }
+  return sum;
+}
+```
 
 ---
 
@@ -287,7 +310,7 @@ public:
 
 #### TailRecursionRule
 
-收集函数体中所有直接递归调用，如果每个调用都位于尾部位置（即某个分支最终 `return` 的值），则生成 `while (1)` 循环，在循环末尾用新参数值替换旧参数。
+收集函数体中所有直接递归调用，如果每个调用都位于尾部位置（即某个分支最终 `return` 的值），则生成 `while (1)` 循环，在循环末尾用 `next_<param>` 更新参数。
 
 #### AccumulatorRule
 
@@ -300,7 +323,13 @@ return min(f(new_args), step);
 return max(f(new_args), step);
 ```
 
-其中 `step` 不依赖递归结果。生成 `while` 循环，用 `acc` 保存中间结果，每次迭代更新 `acc = acc op step`。
+其中 `step` 不依赖递归结果。生成 `while` 循环保存中间结果；变量名根据运算选择（`sum`、`product`、`bits`、`xors`、`min_val`、`max_val`）。
+
+支持多个 base case，但要求它们的返回值相同且不依赖参数（从而可作为累加器的 identity）。循环条件是所有 base case 都不满足：
+
+```cpp
+while (!(cond1) && !(cond2) && ...) { ... }
+```
 
 #### TuplingRule
 
@@ -320,15 +349,15 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k)
 
 处理任意直接递归表达式。算法核心是“双栈 DFS”：
 
-- **工作栈** `stack<std::variant<Frame, int>>`：存储待计算的帧，以及一个整数标记，表示当前帧需要弹出多少个递归结果进行合并。
+- **工作栈** `stack<std::variant<Frame, CombineMarker>>`：存储待计算的帧，以及一个专用标记 `CombineMarker{count}`，表示当前帧需要弹出多少个递归结果进行合并。
 - **值栈** `values`：存储已经计算好的子结果。
 
 遍历过程：
 
 1. 弹出一个帧。
 2. 如果它是 base case，把结果压入 `values`。
-3. 如果它是递归节点，先把 `N`（子调用个数）压入工作栈，再把 `N` 个子调用帧压入工作栈。这样当子调用全部计算完毕后，栈顶的 `N` 标记会触发合并。
-4. 如果它是整数标记 `N`，从 `values` 弹出 `N` 个值，代入原始递归表达式计算当前结果，再压回 `values`。
+3. 如果它是递归节点，先把 `CombineMarker{N}` 压入工作栈，再把 `N` 个子调用帧压入工作栈。这样当子调用全部计算完毕后，栈顶的标记会触发合并。
+4. 如果它是 `CombineMarker`，从 `values` 弹出 `count` 个值，代入原始递归表达式计算当前结果，再压回 `values`。
 
 该规则会自动处理 `min(f(n-1), f(n-2))`、`f(n-1) + 2 * f(n-2)` 等结果后加工场景。
 
@@ -383,7 +412,7 @@ cps/
 - 函数体形式：`[leading] (if-return)* [middle] return recursive-expr;`
 - 递归调用可嵌套在**任意表达式**中：二元/一元运算符、函数调用、条件表达式、数组下标等
 - 双边递归、单边递归、纯尾递归
-- 多个 base case（if-else-if 链）
+- 多个 base case（if-else-if 链），包括 accumulator 规则下的多 base case
 - 常见可结合运算的 accumulator 转换：`+`、`*`、`|`、`^`、`min`、`max`
 - k 阶线性递推的 tupling 转换
 

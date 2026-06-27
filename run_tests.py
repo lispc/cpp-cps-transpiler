@@ -381,6 +381,30 @@ int main() {
             "min_tree(6) = 1",
         ],
     },
+    {
+        "name": "acc_multi_base",
+        "input": "tests/test_input_acc_multi_base.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "acc_multi_base(" << i << ") = " << acc_multi_base(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "acc_multi_base(0) = 0",
+            "acc_multi_base(1) = 0",
+            "acc_multi_base(2) = 2",
+            "acc_multi_base(3) = 5",
+            "acc_multi_base(4) = 9",
+            "acc_multi_base(5) = 14",
+            "acc_multi_base(6) = 20",
+            "acc_multi_base(7) = 27",
+            "acc_multi_base(8) = 35",
+        ],
+    },
 ]
 
 

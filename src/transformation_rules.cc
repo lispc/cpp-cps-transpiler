@@ -101,13 +101,13 @@ public:
           for (unsigned i = 0;
                i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
             std::string pName = FD->getParamDecl(i)->getNameAsString();
-            w.line("auto new_" + pName + " = " +
+            w.line("auto next_" + pName + " = " +
                    PrintExpr(RecCall->getArg(i), Ctx.ASTCtx) + ";");
           }
           for (unsigned i = 0;
                i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
             std::string pName = FD->getParamDecl(i)->getNameAsString();
-            w.line(pName + " = new_" + pName + ";");
+            w.line(pName + " = next_" + pName + ";");
           }
         }
       });
@@ -127,8 +127,20 @@ class AccumulatorRule : public TransformationRule {
 public:
   bool applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override {
-    if (BA.BaseCases.size() != 1)
+    // All base-case return values must be identical and parameter-free, so
+    // they can serve as the accumulator identity.
+    if (BA.BaseCases.empty())
       return false;
+    std::string baseValue;
+    for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
+      if (ExprUsesParams(BA.BaseCases[i].second, Ctx.ParamNameSet))
+        return false;
+      std::string val = PrintExpr(BA.BaseCases[i].second, Ctx.ASTCtx);
+      if (i == 0)
+        baseValue = val;
+      else if (val != baseValue)
+        return false;
+    }
 
     std::vector<CallExpr *> holes;
     CollectHoles(BA.RecExpr, Ctx.FuncName, holes);
@@ -213,36 +225,54 @@ public:
     e.raw("// === Generated accumulator code for function: " + Ctx.FuncName +
           " ===\n\n");
 
+    std::string accName = "acc";
+    if (!op.empty()) {
+      if (op == "+") accName = "sum";
+      else if (op == "*") accName = "product";
+      else if (op == "|") accName = "bits";
+      else if (op == "^") accName = "xors";
+    } else {
+      if (funcName == "min") accName = "min_val";
+      else if (funcName == "max") accName = "max_val";
+    }
+
+    std::string loopCond;
+    for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
+      if (i > 0)
+        loopCond += " && ";
+      loopCond += "!(" + PrintExpr(BA.BaseCases[i].first, Ctx.ASTCtx) + ")";
+    }
+
     std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
     e.block(sig, [&](CodeEmitter &b) {
-      b.line(Ctx.RetType + " acc = " +
+      b.line(Ctx.RetType + " " + accName + " = " +
              PrintExpr(BA.BaseCases[0].second, Ctx.ASTCtx) + ";");
-      b.block("while (!(" + PrintExpr(BA.BaseCases[0].first, Ctx.ASTCtx) + "))",
+      b.block("while (" + loopCond + ")",
               [&](CodeEmitter &w) {
                 EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
                 EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
                 if (!op.empty()) {
-                  w.line("acc = acc " + op + " " + PrintExpr(Step, Ctx.ASTCtx) +
-                         ";");
+                  w.line(accName + " = " + accName + " " + op + " " +
+                         PrintExpr(Step, Ctx.ASTCtx) + ";");
                 } else {
-                  w.line("acc = " + funcName + "(acc, " +
+                  w.line(accName + " = " + funcName + "(" + accName + ", " +
                          PrintExpr(Step, Ctx.ASTCtx) + ");");
                 }
                 if (const CallExpr *RecCE = dyn_cast<CallExpr>(RecCall)) {
                   for (unsigned i = 0;
                        i < FD->getNumParams() && i < RecCE->getNumArgs(); ++i) {
                     std::string pName = FD->getParamDecl(i)->getNameAsString();
-                    w.line("auto new_" + pName + " = " +
+                    w.line("auto next_" + pName + " = " +
                            PrintExpr(RecCE->getArg(i), Ctx.ASTCtx) + ";");
                   }
                   for (unsigned i = 0;
                        i < FD->getNumParams() && i < RecCE->getNumArgs(); ++i) {
                     std::string pName = FD->getParamDecl(i)->getNameAsString();
-                    w.line(pName + " = new_" + pName + ";");
+                    w.line(pName + " = next_" + pName + ";");
                   }
                 }
               });
-      b.line("return acc;");
+      b.line("return " + accName + ";");
     });
 
     return e.str();
@@ -502,20 +532,17 @@ public:
       b.line("std::array<" + Ctx.RetType + ", " + std::to_string(k) + "> vals;");
 
       for (int j = 0; j < k; ++j) {
-        b.line("{");
-        b.inc();
-        b.line(pType + " " + pName + " = " + std::to_string(j) + ";");
         for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-          std::string prefix = (bi == 0) ? "if (" : "else if (";
-          b.line(prefix + PrintExpr(BA.BaseCases[bi].first, Ctx.ASTCtx) + ")");
-          b.inc();
-          b.line("vals[" + std::to_string(j) + "] = " +
-                 PrintExpr(BA.BaseCases[bi].second, Ctx.ASTCtx) + ";");
-          b.dec();
+          if (EvalConditionForParam(BA.BaseCases[bi].first, pName, j) ==
+              EvalResult::True) {
+            std::string baseExpr =
+                ReplaceParamWithLiteral(PrintExpr(BA.BaseCases[bi].second,
+                                                  Ctx.ASTCtx),
+                                        pName, std::to_string(j));
+            b.line("vals[" + std::to_string(j) + "] = " + baseExpr + ";");
+            break;
+          }
         }
-        b.line("else vals[" + std::to_string(j) + "] = 0;");
-        b.dec();
-        b.line("}");
       }
 
       b.block("for (" + pType + " i = " + std::to_string(k) + "; i <= " +
@@ -750,8 +777,16 @@ public:
     std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
     std::string frameName = EmitFrameStruct(e, FD, Ctx);
 
+    std::string markerName = Ctx.FuncName + "CombineMarker";
+    e.block("struct " + markerName, [&](CodeEmitter &b) {
+      b.line("int count;");
+      b.line(markerName + "(int c) : count(c) {}");
+    }, ";");
+    e.nl();
+
     e.block(sig, [&](CodeEmitter &b) {
-      b.line("std::vector<std::variant<" + frameName + ", int>> stack;");
+      b.line("std::vector<std::variant<" + frameName + ", " + markerName +
+             ">> stack;");
       {
         std::string init = "stack.emplace_back(" + frameName + "(";
         for (unsigned i = 0; i < FD->getNumParams(); ++i) {
@@ -767,7 +802,8 @@ public:
       b.block("while (!stack.empty())", [&](CodeEmitter &w) {
         w.line("auto entry = stack.back();");
         w.line("stack.pop_back();");
-        w.block("if (std::holds_alternative<int>(entry))", [&](CodeEmitter &iw) {
+        w.block("if (std::holds_alternative<" + markerName + ">(entry))",
+                [&](CodeEmitter &iw) {
           for (size_t i = 0; i < holes.size(); ++i) {
             iw.line(Ctx.RetType + " v" + std::to_string(i) +
                     " = values.back();");
@@ -792,7 +828,8 @@ public:
           iw.line("else {");
           iw.inc();
           EmitStmts(iw, BA.MiddleStmts, Ctx.ASTCtx);
-          iw.line("stack.emplace_back(" + std::to_string(holes.size()) + ");");
+          iw.line("stack.emplace_back(" + markerName + "(" +
+                  std::to_string(holes.size()) + "));");
           for (size_t i = 0; i < holes.size(); ++i) {
             std::string push = "stack.emplace_back(" + frameName + "(";
             for (unsigned a = 0;

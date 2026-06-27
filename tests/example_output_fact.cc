@@ -7,13 +7,13 @@
 // === Generated accumulator code for function: fact ===
 
 int fact(int n) {
-  int acc = 1;
+  int product = 1;
   while (!(n <= 1)) {
-    acc = acc * n;
-    auto new_n = n - 1;
-    n = new_n;
+    product = product * n;
+    auto next_n = n - 1;
+    n = next_n;
   }
-  return acc;
+  return product;
 }
 
 

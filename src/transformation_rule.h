@@ -109,6 +109,11 @@ std::string Indent(const std::string &s, int n);
 std::string ReplaceParamsWithCur(const std::string &S,
                                  const std::vector<std::string> &Params);
 
+// Replace standalone occurrences of Param in S with Literal.
+std::string ReplaceParamWithLiteral(const std::string &S,
+                                    const std::string &Param,
+                                    const std::string &Literal);
+
 // Emit a list of statements as code lines.
 void EmitStmts(CodeEmitter &e,
                const std::vector<const clang::Stmt *> &Stmts,

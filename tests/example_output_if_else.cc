@@ -7,13 +7,13 @@
 // === Generated accumulator code for function: if_else ===
 
 int if_else(int n) {
-  int acc = 1;
+  int product = 1;
   while (!(n <= 1)) {
-    acc = acc * 2;
-    auto new_n = n - 1;
-    n = new_n;
+    product = product * 2;
+    auto next_n = n - 1;
+    n = next_n;
   }
-  return acc;
+  return product;
 }
 
 

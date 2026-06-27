@@ -14,18 +14,8 @@ int fib(int n) {
     return 0;
   }
   std::array<int, 2> vals;
-  {
-    int n = 0;
-    if (n <= 1)
-      vals[0] = n;
-    else vals[0] = 0;
-  }
-  {
-    int n = 1;
-    if (n <= 1)
-      vals[1] = n;
-    else vals[1] = 0;
-  }
+  vals[0] = 0;
+  vals[1] = 1;
   for (int i = 2; i <= n; ++i) {
     int next = (vals[1] + vals[0]);
     for (int j = 0; j < 1; ++j)

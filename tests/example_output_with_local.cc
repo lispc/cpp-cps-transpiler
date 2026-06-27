@@ -7,15 +7,15 @@
 // === Generated accumulator code for function: with_local ===
 
 int with_local(int n) {
-  int acc = 1;
+  int product = 1;
   while (!(n <= 1)) {
     auto m = n - 1;
 
-    acc = acc * n;
-    auto new_n = m;
-    n = new_n;
+    product = product * n;
+    auto next_n = m;
+    n = next_n;
   }
-  return acc;
+  return product;
 }
 
 

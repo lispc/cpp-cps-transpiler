@@ -9,10 +9,10 @@
 int gcd(int a, int b) {
   while (1) {
     if (b == 0) return a;
-    auto new_a = b;
-    auto new_b = a % b;
-    a = new_a;
-    b = new_b;
+    auto next_a = b;
+    auto next_b = a % b;
+    a = next_a;
+    b = next_b;
   }
 }
 
