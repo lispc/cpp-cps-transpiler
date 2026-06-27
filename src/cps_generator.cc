@@ -441,7 +441,7 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA,
   const Stmt *Loop = nullptr;
   const IfStmt *RecIf = nullptr;
   CallExpr *RecCall = nullptr;
-  if (IsTreeTraversalShape(CS, FuncName, Loop, RecIf, RecCall)) {
+  if (IsTreeTraversalShape(CS, FuncName, Loop, RecIf, RecCall, IsVoid)) {
     BA.IsRecursive = true;
     return true;
   }

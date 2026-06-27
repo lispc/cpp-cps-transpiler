@@ -85,6 +85,31 @@ bool IsIdentifierBoundary(char c) {
   return !std::isalnum(static_cast<unsigned char>(c)) && c != '_';
 }
 
+bool ContainsCall(const Stmt *Root, const CallExpr *Target) {
+  if (!Root)
+    return false;
+  if (Root == Target)
+    return true;
+  for (const Stmt *Child : Root->children()) {
+    if (ContainsCall(Child, Target))
+      return true;
+  }
+  return false;
+}
+
+const Stmt *FindDirectChildStmtContainingCall(const Stmt *Root,
+                                              const CallExpr *Target) {
+  if (!Root)
+    return nullptr;
+  for (const Stmt *Child : Root->children()) {
+    if (!Child)
+      continue;
+    if (Child == Target || ContainsCall(Child, Target))
+      return Child;
+  }
+  return nullptr;
+}
+
 } // anonymous namespace
 
 bool IdentifierUsedInCode(const std::string &Code,
@@ -281,12 +306,12 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
         return false;
     } else {
       // After the loop we allow at most one final return. For void functions
-      // the body may simply fall through.
+      // any recursion-free tail statements are also allowed.
       if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
         if (seenReturnAfterLoop)
           return false;
         seenReturnAfterLoop = true;
-      } else {
+      } else if (!IsVoid) {
         return false;
       }
     }
@@ -307,7 +332,10 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
   if (OutRecIf && OutRecCall)
     return true;
 
-  // Case 2: recursive call appears as an expression statement.
+  // Case 2: a single recursive call appears somewhere inside the loop body.
+  // We will replace the statement that encloses it with an explicit stack push.
+  // This covers expression-statement recursion as well as recursion guarded by
+  // an if condition, including condition-variable initializers.
   OutRecCall = calls[0];
   return true;
 }

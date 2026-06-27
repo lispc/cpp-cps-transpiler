@@ -187,6 +187,32 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
     return s;
   };
 
+  auto buildFrameCtorArgsFromParams = [&]() {
+    std::string s;
+    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      if (IsOutRef[i])
+        continue;
+      if (!s.empty())
+        s += ", ";
+      s += FD->getParamDecl(i)->getNameAsString();
+    }
+    return s;
+  };
+
+  // Identify post-loop statements. For void tree traversals these are emitted
+  // after children have been processed (post-order phase).
+  std::vector<const Stmt *> PostLoopStmts;
+  bool pastLoop = false;
+  for (const Stmt *S : CS->body()) {
+    if (S == LoopStmt) {
+      pastLoop = true;
+      continue;
+    }
+    if (pastLoop)
+      PostLoopStmts.push_back(S);
+  }
+  bool HasPostLoop = IsVoid && !PostLoopStmts.empty();
+
   std::string frameName = Ctx.FuncName + "Frame";
 
   CodeEmitter e;
@@ -204,6 +230,8 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
       b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
              FD->getParamDecl(i)->getNameAsString() + ";");
     }
+    if (HasPostLoop)
+      b.line("bool done;");
     std::string ctor = frameName + "(";
     std::string init;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
@@ -216,6 +244,14 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
       }
       ctor += GetParamStorageType(FD->getParamDecl(i)) + " " + p + "_";
       init += p + "(" + p + "_)";
+    }
+    if (HasPostLoop) {
+      if (!init.empty()) {
+        ctor += ", ";
+        init += ", ";
+      }
+      ctor += "bool done_ = false";
+      init += "done(done_)";
     }
     ctor += ")";
     if (!init.empty())
@@ -260,62 +296,150 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
                FD->getParamDecl(i)->getNameAsString() + ";");
       }
 
-      // Emit base cases (all IfStmts before the loop).
-      for (const Stmt *S : CS->body()) {
-        if (IsLoopStmt(S))
-          break;
-        if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-          std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
-          if (!txt.empty()) {
-            txt = EnsureSemicolon(txt);
-            w.raw(Indent(txt, w.current_indent()) + "\n");
+      auto emitBaseCases = [&](CodeEmitter &target, bool inPostLoop) {
+        for (const Stmt *S : CS->body()) {
+          if (IsLoopStmt(S))
+            break;
+          if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+            std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
+            if (!txt.empty()) {
+              txt = EnsureSemicolon(txt);
+              // Inside the explicit stack loop, a void base case "return;"
+              // means "skip the rest of this frame", not "exit the function".
+              if (IsVoid && !inPostLoop)
+                txt = ReplaceWholeWord(txt, "return", "continue");
+              target.raw(Indent(txt, target.current_indent()) + "\n");
+            }
           }
         }
-      }
+      };
 
-      // Emit the loop. For range-based for loops we rewrite to reverse
-      // iteration so that children are processed in original DFS order on the
-      // explicit stack.
-      std::string pushStr = "stack.emplace_back(" + frameName + "(" +
-                            buildFrameCtorArgs(RecCall) + "));";
-      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-      if (ForRange) {
-        std::string rangeSrc =
-            GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-        std::string loopVarSrc =
-            StripTrailingColon(GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-        w.block("", [&](CodeEmitter &rb) {
-          rb.line("auto &&__cps_range = " + rangeSrc + ";");
-          rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
-                   "__cps_range.rend(); ++__cps_it)",
-                   [&](CodeEmitter &fb) {
-                     fb.line(loopVarSrc + " = *__cps_it;");
-                     fb.line(pushStr);
-                   });
+      if (HasPostLoop) {
+        w.block("if (cur.done)", [&](CodeEmitter &dw) {
+          for (const Stmt *S : PostLoopStmts) {
+            std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
+            if (!txt.empty()) {
+              txt = EnsureSemicolon(txt);
+              dw.raw(Indent(txt, dw.current_indent()) + "\n");
+            }
+          }
+        });
+        w.block("else", [&](CodeEmitter &ew) {
+          emitBaseCases(ew, false);
+
+          std::string pushStr =
+              "stack.emplace_back(" + frameName + "(" +
+              buildFrameCtorArgs(RecCall) + "));";
+          std::string markerStr =
+              "stack.emplace_back(" + frameName + "(" +
+              buildFrameCtorArgsFromParams() + ", true));";
+
+          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+          if (ForRange) {
+            std::string rangeSrc =
+                GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+            std::string loopVarSrc = StripTrailingColon(
+                GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+            ew.block("", [&](CodeEmitter &rb) {
+              rb.line("auto &&__cps_range = " + rangeSrc + ";");
+              rb.line(markerStr);
+              rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
+                       "__cps_range.rend(); ++__cps_it)",
+                       [&](CodeEmitter &fb) {
+                         fb.line(loopVarSrc + " = *__cps_it;");
+                         fb.line(pushStr);
+                       });
+            });
+          } else {
+            // Marker is pushed with current parameters, not recursive-call
+            // arguments; reuse the current parameter names.
+            std::string markerStrNonRange =
+                "stack.emplace_back(" + frameName + "(" +
+                buildFrameCtorArgsFromParams() + ", true));";
+            ew.line(markerStrNonRange);
+            std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
+            if (RecIf) {
+              std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
+              size_t pos = loopSrc.find(recIfSrc);
+              if (pos != std::string::npos) {
+                loopSrc.replace(pos, recIfSrc.size(), pushStr);
+                size_t p2 = loopSrc.find(";;", pos);
+                if (p2 != std::string::npos)
+                  loopSrc.replace(p2, 2, ";");
+              }
+            } else {
+              // Replace the statement that directly contains the recursive call.
+              const Stmt *Encl =
+                  FindDirectChildStmtContainingCall(LoopBody, RecCall);
+              std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                                           : GetSourceText(RecCall, Ctx.ASTCtx);
+              if (!toReplace.empty()) {
+                size_t pos = loopSrc.find(toReplace);
+                if (pos != std::string::npos) {
+                  loopSrc.replace(pos, toReplace.size(), pushStr);
+                  size_t p2 = loopSrc.find(";;", pos);
+                  if (p2 != std::string::npos)
+                    loopSrc.replace(p2, 2, ";");
+                }
+              }
+            }
+            ew.raw(Indent(NormalizeIndentation(loopSrc), ew.current_indent()) +
+                   "\n");
+          }
         });
       } else {
-        std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-        std::string toReplace;
-        if (RecIf) {
-          toReplace = GetSourceText(RecIf, Ctx.ASTCtx);
+        emitBaseCases(w, false);
+
+        // Emit the loop. For range-based for loops we rewrite to reverse
+        // iteration so that children are processed in original DFS order on
+        // the explicit stack.
+        std::string pushStr = "stack.emplace_back(" + frameName + "(" +
+                              buildFrameCtorArgs(RecCall) + "));";
+        const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+        if (ForRange) {
+          std::string rangeSrc =
+              GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+          std::string loopVarSrc = StripTrailingColon(
+              GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+          w.block("", [&](CodeEmitter &rb) {
+            rb.line("auto &&__cps_range = " + rangeSrc + ";");
+            rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
+                     "__cps_range.rend(); ++__cps_it)",
+                     [&](CodeEmitter &fb) {
+                       fb.line(loopVarSrc + " = *__cps_it;");
+                       fb.line(pushStr);
+                     });
+          });
         } else {
-          const Stmt *Encl =
-              FindDirectChildStmtContainingCall(LoopBody, RecCall);
-          toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
-                           : GetSourceText(RecCall, Ctx.ASTCtx);
-        }
-        if (!toReplace.empty()) {
-          size_t pos = loopSrc.find(toReplace);
-          if (pos != std::string::npos) {
-            loopSrc.replace(pos, toReplace.size(), pushStr);
-            // getSourceText may leave the original trailing ';' outside the
-            // replaced range, causing double semicolons.
-            size_t p2 = loopSrc.find(";;", pos);
-            if (p2 != std::string::npos)
-              loopSrc.replace(p2, 2, ";");
+          std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
+          if (RecIf) {
+            std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
+            size_t pos = loopSrc.find(recIfSrc);
+            if (pos != std::string::npos) {
+              loopSrc.replace(pos, recIfSrc.size(), pushStr);
+              size_t p2 = loopSrc.find(";;", pos);
+              if (p2 != std::string::npos)
+                loopSrc.replace(p2, 2, ";");
+            }
+          } else {
+            // Replace the statement that directly contains the recursive call.
+            const Stmt *Encl =
+                FindDirectChildStmtContainingCall(LoopBody, RecCall);
+            std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                                         : GetSourceText(RecCall, Ctx.ASTCtx);
+            if (!toReplace.empty()) {
+              size_t pos = loopSrc.find(toReplace);
+              if (pos != std::string::npos) {
+                loopSrc.replace(pos, toReplace.size(), pushStr);
+                size_t p2 = loopSrc.find(";;", pos);
+                if (p2 != std::string::npos)
+                  loopSrc.replace(p2, 2, ";");
+              }
+            }
           }
+          w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent()) +
+                 "\n");
         }
-        w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent()) + "\n");
       }
     });
 
