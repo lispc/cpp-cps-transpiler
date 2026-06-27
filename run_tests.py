@@ -1957,6 +1957,114 @@ int main() {
             "other = 0",
         ],
     },
+    {
+        "name": "collect_callees_original",
+        "input": "tests/test_input_collect_callees.cc",
+        "preamble": """
+#include <string>
+
+namespace std {
+
+template <typename T>
+class unordered_set {
+public:
+  static constexpr int Max = 16;
+  T Items[Max];
+  int Size;
+  unordered_set() : Size(0) {}
+  void insert(const T &V) {
+    for (int i = 0; i < Size; ++i)
+      if (Items[i] == V)
+        return;
+    Items[Size++] = V;
+  }
+};
+
+} // namespace std
+
+struct StmtRange;
+
+struct Stmt {
+  virtual ~Stmt() = default;
+  virtual StmtRange children() const;
+};
+
+struct StmtRange {
+  static constexpr int Max = 16;
+  const Stmt *Items[Max];
+  int Size;
+  StmtRange() : Size(0) {}
+  void push_back(const Stmt *S) { Items[Size++] = S; }
+  const Stmt *const *begin() const { return Items; }
+  const Stmt *const *end() const { return Items + Size; }
+
+  struct RevIt {
+    const Stmt *const *P;
+    const Stmt *operator*() { return *(P - 1); }
+    RevIt &operator++() { --P; return *this; }
+    bool operator!=(const RevIt &O) const { return P != O.P; }
+  };
+  RevIt rbegin() { return RevIt{Items + Size}; }
+  RevIt rend() { return RevIt{Items}; }
+};
+
+StmtRange Stmt::children() const { return StmtRange(); }
+
+struct Expr : Stmt {
+  StmtRange children() const override { return StmtRange(); }
+};
+
+struct FunctionDecl {
+  std::string Name;
+  FunctionDecl(const std::string &N) : Name(N) {}
+  std::string getNameAsString() const { return Name; }
+};
+
+struct CallExpr : Expr {
+  FunctionDecl *Callee;
+  StmtRange Args;
+  CallExpr(FunctionDecl *C) : Callee(C) {}
+  void addArg(Expr *A) { Args.push_back(A); }
+  FunctionDecl *getDirectCallee() const { return Callee; }
+  StmtRange children() const override {
+    StmtRange R;
+    for (const Stmt *S : Args)
+      R.push_back(S);
+    return R;
+  }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+#include <iostream>
+int main() {
+  FunctionDecl f("foo"), g("bar");
+  Expr leaf;
+  CallExpr call_f(&f);
+  call_f.addArg(&leaf);
+  CallExpr call_g(&g);
+  call_g.addArg(&call_f);
+  std::unordered_set<std::string> callees;
+  CollectCallees(&call_g, callees);
+  std::cout << "count = " << callees.Size << std::endl;
+  bool has_foo = false, has_bar = false;
+  for (int i = 0; i < callees.Size; ++i) {
+    if (callees.Items[i] == "foo") has_foo = true;
+    if (callees.Items[i] == "bar") has_bar = true;
+  }
+  std::cout << "has_foo = " << has_foo << std::endl;
+  std::cout << "has_bar = " << has_bar << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "count = 2",
+            "has_foo = 1",
+            "has_bar = 1",
+        ],
+    },
 ]
 
 
