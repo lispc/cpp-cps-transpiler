@@ -53,7 +53,12 @@ struct BodyAnalysis {
 //   (if-return)*
 //   [middle-stmts]
 //   return recursive-expr;
-bool AnalyzeBody(const clang::Stmt *Body, BodyAnalysis &BA);
+// A ternary expression "return cond ? base : rec;" is also normalized into
+// a base case plus a recursive return.
+bool AnalyzeBody(const clang::Stmt *Body, BodyAnalysis &BA,
+                 const clang::ASTContext *Ctx,
+                 const std::string &FuncName,
+                 bool IsVoid);
 
 // ============================================================
 // Code generation state
@@ -66,6 +71,10 @@ struct GenContext {
   std::vector<std::string> ParamNames;
   std::unordered_set<std::string> ParamNameSet;
   const clang::ASTContext *ASTCtx;
+
+  // Optional user overrides.
+  std::string ForceRule;  // If non-empty, only consider this rule.
+  bool ExplainSelection = false;
 };
 
 // ============================================================
@@ -81,6 +90,11 @@ std::string PrintExprWithReplacements(
     const clang::ASTContext *Ctx);
 
 std::string PrintStmt(const clang::Stmt *S, const clang::ASTContext *Ctx);
+
+// Strip matching outer parentheses from a printed expression, e.g. "(x)" -> "x".
+// Only removes parentheses that wrap the entire string without changing
+// precedence.
+std::string StripOuterParens(std::string s);
 
 // Gather direct recursive calls inside E. Do not descend into arguments of a
 // recursive call itself.
@@ -103,6 +117,12 @@ bool ExprUsesParams(const clang::Expr *E,
 // Known-pure calls like min/max/std::min/std::max are whitelisted.
 bool IsPureExpr(const clang::Expr *E);
 
+// Same as IsPureExpr, but treats direct recursive calls to FuncName as pure.
+// Useful when analyzing a recursive expression for transformations like
+// memoization, where the recursive calls themselves will be replaced.
+bool IsPureExprIgnoringRecursiveCalls(const clang::Expr *E,
+                                      const std::string &FuncName);
+
 // Does this expression (with given holes replaced) or any remaining hole
 // arguments reference parameters?
 bool NeedsSavedArg(
@@ -113,6 +133,9 @@ bool NeedsSavedArg(
 // Return the type to store in the Arg struct for a parameter.
 // References are stored by their underlying value type.
 std::string GetParamStorageType(const clang::ParmVarDecl *PVD);
+
+// Normalize Clang-printed type names (e.g., "_Bool" -> "bool").
+std::string NormalizeTypeName(const std::string &TypeStr);
 
 // Build a function signature string "RetType name(T0 p0, T1 p1, ...)".
 std::string BuildFunctionSignature(const clang::FunctionDecl *FD,

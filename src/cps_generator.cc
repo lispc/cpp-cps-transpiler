@@ -2,6 +2,7 @@
 #include "code_emitter.h"
 #include "transformation_rule.h"
 #include "transformation_rules.h"
+#include "transformation_rules_helpers.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -33,6 +34,41 @@ std::string PrintStmt(const Stmt *S, const ASTContext *Ctx) {
   llvm::raw_string_ostream os(s);
   S->printPretty(os, nullptr, Ctx->getPrintingPolicy());
   os.flush();
+  return s;
+}
+
+std::string Trim(const std::string &S) {
+  size_t a = 0;
+  while (a < S.size() && std::isspace(static_cast<unsigned char>(S[a])))
+    ++a;
+  size_t b = S.size();
+  while (b > a && std::isspace(static_cast<unsigned char>(S[b - 1])))
+    --b;
+  return S.substr(a, b - a);
+}
+
+std::string StripOuterParens(std::string s) {
+  while (true) {
+    s = Trim(s);
+    if (s.size() < 2 || s.front() != '(' || s.back() != ')')
+      break;
+    int depth = 0;
+    bool canStrip = true;
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (s[i] == '(')
+        ++depth;
+      else if (s[i] == ')') {
+        --depth;
+        if (depth == 0 && i != s.size() - 1) {
+          canStrip = false;
+          break;
+        }
+      }
+    }
+    if (!canStrip)
+      break;
+    s = s.substr(1, s.size() - 2);
+  }
   return s;
 }
 
@@ -110,148 +146,8 @@ std::string PrintExprWithReplacements(
 }
 
 // ============================================================
-// Hole collection
+// Saved argument analysis
 // ============================================================
-
-void CollectHoles(const Expr *E, const std::string &FuncName,
-                  std::vector<CallExpr *> &Holes) {
-  if (!E)
-    return;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
-      if (Callee->getNameAsString() == FuncName) {
-        Holes.push_back(const_cast<CallExpr *>(CE));
-        return;
-      }
-    }
-  }
-  for (const Stmt *Child : E->children()) {
-    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
-      CollectHoles(ChildExpr, FuncName, Holes);
-    }
-  }
-}
-
-void CollectHolesDeep(const Expr *E, const std::string &FuncName,
-                      std::vector<CallExpr *> &Holes) {
-  if (!E)
-    return;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
-      if (Callee->getNameAsString() == FuncName) {
-        // Post-order: descend into arguments first, then record this call.
-        for (unsigned i = 0; i < CE->getNumArgs(); ++i)
-          CollectHolesDeep(CE->getArg(i), FuncName, Holes);
-        Holes.push_back(const_cast<CallExpr *>(CE));
-        return;
-      }
-    }
-  }
-  for (const Stmt *Child : E->children()) {
-    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
-      CollectHolesDeep(ChildExpr, FuncName, Holes);
-    }
-  }
-}
-
-bool ContainsRecursiveCall(const Expr *E, const std::string &FuncName) {
-  if (!E)
-    return false;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
-      if (Callee->getNameAsString() == FuncName)
-        return true;
-    }
-  }
-  for (const Stmt *Child : E->children()) {
-    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
-      if (ContainsRecursiveCall(ChildExpr, FuncName))
-        return true;
-    }
-  }
-  return false;
-}
-
-// ============================================================
-// Parameter usage helpers
-// ============================================================
-
-bool ExprUsesParams(const Expr *E,
-                    const std::unordered_set<std::string> &ParamNames) {
-  if (!E)
-    return false;
-  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
-    if (const ValueDecl *VD = DRE->getDecl()) {
-      if (ParamNames.count(VD->getNameAsString()))
-        return true;
-    }
-  }
-  for (const Stmt *Child : E->children()) {
-    if (ExprUsesParams(dyn_cast_or_null<Expr>(Child), ParamNames))
-      return true;
-  }
-  return false;
-}
-
-namespace {
-
-bool IsKnownPureFunction(const std::string &Name) {
-  return Name == "min" || Name == "max" || Name == "std::min" ||
-         Name == "std::max";
-}
-
-bool IsPureExprImpl(const Expr *E) {
-  if (!E)
-    return true;
-
-  E = E->IgnoreParenImpCasts();
-
-  // Calls: conservative, except whitelisted pure functions.
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    std::string name;
-    if (const FunctionDecl *Callee = CE->getDirectCallee())
-      name = Callee->getNameAsString();
-    if (IsKnownPureFunction(name)) {
-      for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
-        if (!IsPureExprImpl(CE->getArg(i)))
-          return false;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  // Assignments and compound assignments are side effects.
-  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
-    if (BO->isAssignmentOp())
-      return false;
-    return IsPureExprImpl(BO->getLHS()) && IsPureExprImpl(BO->getRHS());
-  }
-
-  // Increment/decrement and address-of are side effects.
-  if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
-    if (UO->isIncrementDecrementOp())
-      return false;
-    return IsPureExprImpl(UO->getSubExpr());
-  }
-
-  // Comma operator evaluates both and discards left: left may have side effects.
-  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
-    if (BO->getOpcode() == BO_Comma)
-      return false;
-  }
-
-  // Everything else is pure if its children are pure.
-  for (const Stmt *Child : E->children()) {
-    if (!IsPureExprImpl(dyn_cast_or_null<Expr>(Child)))
-      return false;
-  }
-  return true;
-}
-
-} // anonymous namespace
-
-bool IsPureExpr(const Expr *E) { return IsPureExprImpl(E); }
 
 bool NeedsSavedArg(
     const Expr *E, const std::vector<CallExpr *> &Holes,
@@ -272,11 +168,19 @@ bool NeedsSavedArg(
 // Code generation state helpers
 // ============================================================
 
+std::string NormalizeTypeName(const std::string &TypeStr) {
+  // Clang prints C++ bool as "_Bool" in some contexts, which is not valid
+  // C++ without <stdbool.h>. Normalize it to the proper C++ keyword.
+  if (TypeStr == "_Bool")
+    return "bool";
+  return TypeStr;
+}
+
 std::string GetParamStorageType(const ParmVarDecl *PVD) {
   QualType T = PVD->getType();
   if (T->isReferenceType())
     T = T.getNonReferenceType();
-  return T.getAsString();
+  return NormalizeTypeName(T.getAsString());
 }
 
 std::string BuildFunctionSignature(const FunctionDecl *FD,
@@ -285,8 +189,8 @@ std::string BuildFunctionSignature(const FunctionDecl *FD,
   for (unsigned i = 0; i < FD->getNumParams(); ++i) {
     if (i > 0)
       sig += ", ";
-    sig += FD->getParamDecl(i)->getType().getAsString() + " " +
-           FD->getParamDecl(i)->getNameAsString();
+    sig += NormalizeTypeName(FD->getParamDecl(i)->getType().getAsString()) +
+           " " + FD->getParamDecl(i)->getNameAsString();
   }
   sig += ")";
   return sig;
@@ -320,50 +224,26 @@ std::string Indent(const std::string &s, int n) {
 std::string ReplaceParamsWithCur(const std::string &S,
                                  const std::vector<std::string> &Params) {
   std::string result = S;
-  for (const auto &p : Params) {
-    size_t pos = 0;
-    while ((pos = result.find(p, pos)) != std::string::npos) {
-      bool leftOK = (pos == 0) ||
-                    (!std::isalnum(result[pos - 1]) && result[pos - 1] != '_');
-      size_t end = pos + p.length();
-      bool rightOK = (end == result.size()) ||
-                     (!std::isalnum(result[end]) && result[end] != '_');
-      if (leftOK && rightOK) {
-        result.replace(pos, p.length(), "cur." + p);
-        pos += 4 + p.length();
-      } else {
-        ++pos;
-      }
-    }
-  }
+  for (const auto &p : Params)
+    result = ReplaceWholeWord(result, p, "cur." + p);
   return result;
 }
 
 std::string ReplaceParamWithLiteral(const std::string &S,
                                     const std::string &Param,
                                     const std::string &Literal) {
-  std::string result = S;
-  size_t pos = 0;
-  while ((pos = result.find(Param, pos)) != std::string::npos) {
-    bool leftOK = (pos == 0) ||
-                  (!std::isalnum(result[pos - 1]) && result[pos - 1] != '_');
-    size_t end = pos + Param.length();
-    bool rightOK = (end == result.size()) ||
-                   (!std::isalnum(result[end]) && result[end] != '_');
-    if (leftOK && rightOK) {
-      result.replace(pos, Param.length(), Literal);
-      pos += Literal.length();
-    } else {
-      ++pos;
-    }
-  }
-  return result;
+  return ReplaceWholeWord(S, Param, Literal);
 }
 
 void EmitStmts(CodeEmitter &e, const std::vector<const Stmt *> &Stmts,
                const ASTContext *Ctx) {
   for (const Stmt *S : Stmts) {
-    e.line(PrintStmt(S, Ctx));
+    std::string line = PrintStmt(S, Ctx);
+    // Clang's printPretty does not append a semicolon when printing an Expr
+    // that happens to be used as a full statement. Add it manually.
+    if (isa<Expr>(S) && !line.empty() && line.back() != ';')
+      line += ';';
+    e.line(line);
   }
 }
 
@@ -419,13 +299,23 @@ const Expr *ExtractReturnExpr(const Stmt *S) {
   return nullptr;
 }
 
+bool IsVoidReturn(const Stmt *S) {
+  if (isa<ReturnStmt>(S))
+    return true;
+  if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
+    if (CS->size() == 1)
+      return IsVoidReturn(CS->body_begin()[0]);
+  }
+  return false;
+}
+
 BaseCase MakeBaseCase(const Expr *Cond, const Expr *Value,
                       const ASTContext *Ctx) {
   BaseCase bc;
   bc.CondExpr = Cond;
   bc.ValueExpr = Value;
-  bc.CondStr = PrintExpr(Cond, Ctx);
-  bc.ValueStr = PrintExpr(Value, Ctx);
+  bc.CondStr = Cond ? StripOuterParens(PrintExpr(Cond, Ctx)) : "";
+  bc.ValueStr = Value ? StripOuterParens(PrintExpr(Value, Ctx)) : "";
   return bc;
 }
 
@@ -447,26 +337,6 @@ void FlattenIfElse(const Stmt *S, BodyAnalysis &BA, const ASTContext *Ctx) {
 }
 
 namespace {
-
-bool IsInTailPosition(const Expr *E, const Stmt *S,
-                      const std::string &FuncName) {
-  if (!E || !S)
-    return false;
-  if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S))
-    return RS->getRetValue() == E;
-  if (const IfStmt *IfS = dyn_cast<IfStmt>(S))
-    return IsInTailPosition(E, IfS->getThen(), FuncName) ||
-           IsInTailPosition(E, IfS->getElse(), FuncName);
-  if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
-    if (CS->body_empty())
-      return false;
-    const Stmt *Last = nullptr;
-    for (const Stmt *Child : CS->body())
-      Last = Child;
-    return IsInTailPosition(E, Last, FuncName);
-  }
-  return false;
-}
 
 // Collect all case values from a possibly nested chain of CaseStmts
 // (e.g., "case 0: case 1: return ...").
@@ -556,7 +426,10 @@ bool IsReturnOrIfReturnOrSwitch(const Stmt *S) {
 
 } // anonymous namespace
 
-bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA, const ASTContext *Ctx) {
+bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA,
+                 const ASTContext *Ctx,
+                 const std::string &FuncName,
+                 bool IsVoid) {
   BA = BodyAnalysis();
   const CompoundStmt *CS = dyn_cast<CompoundStmt>(Body);
   if (!CS)
@@ -575,7 +448,9 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA, const ASTContext *Ctx) {
     const Stmt *S = CS->body_begin()[idx];
     if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
       const Expr *BaseExpr = ExtractReturnExpr(IfS->getThen());
-      if (!BaseExpr)
+      // A void base case "if (cond) return;" has no value expression and is
+      // valid for void functions; non-void functions require a return value.
+      if (!BaseExpr && !IsVoidReturn(IfS->getThen()))
         return false;
       BA.BaseCases.push_back(MakeBaseCase(IfS->getCond(), BaseExpr, Ctx));
       if (const Stmt *Else = IfS->getElse()) {
@@ -593,10 +468,54 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA, const ASTContext *Ctx) {
       break;
     }
     if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
-      BA.RecExpr = RS->getRetValue();
-      BA.IsRecursive = true;
+      const Expr *Ret = RS->getRetValue();
+      // Normalize "return cond ? base : rec;" into a base case + recursive expr.
+      bool splitTernary = false;
+      if (Ret) {
+        if (const ConditionalOperator *CO =
+                dyn_cast<ConditionalOperator>(Ret->IgnoreParenImpCasts())) {
+          const Expr *TrueE = CO->getTrueExpr()->IgnoreParenImpCasts();
+          const Expr *FalseE = CO->getFalseExpr()->IgnoreParenImpCasts();
+          bool trueRec = ContainsRecursiveCall(TrueE, FuncName);
+          bool falseRec = ContainsRecursiveCall(FalseE, FuncName);
+          if (trueRec && !falseRec) {
+            BA.BaseCases.push_back(
+                MakeBaseCase(CO->getCond(), FalseE, Ctx));
+            BA.RecExpr = TrueE;
+            BA.IsRecursive = true;
+            splitTernary = true;
+          } else if (!trueRec && falseRec) {
+            BA.BaseCases.push_back(
+                MakeBaseCase(CO->getCond(), TrueE, Ctx));
+            BA.RecExpr = FalseE;
+            BA.IsRecursive = true;
+            splitTernary = true;
+          }
+        }
+      }
+      if (!splitTernary) {
+        BA.RecExpr = Ret;
+        BA.IsRecursive = true;
+      }
       ++idx;
       break;
+    }
+    // For void tail-recursive functions, the recursive "return" may be an
+    // expression statement containing a direct recursive call.
+    if (IsVoid) {
+      if (const Expr *E = dyn_cast<Expr>(S)) {
+        E = E->IgnoreParenImpCasts();
+        if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+          if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+            if (Callee->getNameAsString() == FuncName) {
+              BA.RecExpr = E;
+              BA.IsRecursive = true;
+              ++idx;
+              break;
+            }
+          }
+        }
+      }
     }
     BA.MiddleStmts.push_back(S);
     ++idx;
@@ -612,7 +531,9 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA, const ASTContext *Ctx) {
 // Public API
 // ============================================================
 
-std::string GenerateCPS(const FunctionDecl *FD) {
+std::string GenerateCPS(const FunctionDecl *FD,
+                        const std::string &ForceRule,
+                        bool ExplainSelection) {
   if (!FD || !FD->hasBody())
     return "";
 
@@ -620,7 +541,9 @@ std::string GenerateCPS(const FunctionDecl *FD) {
   Ctx.FuncName = FD->getNameAsString();
   Ctx.ArgType = Ctx.FuncName + "Arg";
   Ctx.ASTCtx = &FD->getASTContext();
-  Ctx.RetType = FD->getReturnType().getAsString();
+  Ctx.RetType = NormalizeTypeName(FD->getReturnType().getAsString());
+  Ctx.ForceRule = ForceRule;
+  Ctx.ExplainSelection = ExplainSelection;
 
   for (unsigned i = 0; i < FD->getNumParams(); ++i) {
     std::string pname = FD->getParamDecl(i)->getNameAsString();
@@ -628,8 +551,9 @@ std::string GenerateCPS(const FunctionDecl *FD) {
     Ctx.ParamNameSet.insert(pname);
   }
 
+  bool isVoid = FD->getReturnType()->isVoidType();
   BodyAnalysis BA;
-  if (!AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx)) {
+  if (!AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx, Ctx.FuncName, isVoid)) {
     errs() << "[cps-transpiler] Function body not in supported shape "
               "(expected: leading-stmts? (if-return)* return recursive;)\n";
     return "";
@@ -638,9 +562,23 @@ std::string GenerateCPS(const FunctionDecl *FD) {
   auto rules = CreateDefaultRules();
   const TransformationRule *bestRule = nullptr;
   for (const auto &rule : rules) {
+    if (!Ctx.ForceRule.empty() &&
+        std::string(rule->name()) != Ctx.ForceRule) {
+      continue;
+    }
     if (rule->applies(FD, BA, Ctx)) {
       if (!bestRule || rule->cost() < bestRule->cost())
         bestRule = rule.get();
+    }
+  }
+
+  if (Ctx.ExplainSelection) {
+    if (bestRule) {
+      llvm::outs() << "[Rule selection] " << Ctx.FuncName << " -> "
+                   << bestRule->name() << "\n";
+    } else {
+      llvm::outs() << "[Rule selection] " << Ctx.FuncName
+                   << " -> no applicable rule\n";
     }
   }
 
@@ -654,6 +592,34 @@ std::string GenerateCPS(const FunctionDecl *FD) {
 // Mutual recursion support (basic tail-recursive groups)
 // ============================================================
 
+namespace {
+
+std::string CommonPrefix(const std::vector<std::string> &Names) {
+  if (Names.empty())
+    return "";
+  std::string prefix = Names[0];
+  for (size_t i = 1; i < Names.size(); ++i) {
+    size_t len = 0;
+    while (len < prefix.size() && len < Names[i].size() &&
+           prefix[len] == Names[i][len])
+      ++len;
+    prefix.resize(len);
+  }
+  // Trim trailing underscore if present for nicer naming.
+  if (!prefix.empty() && prefix.back() == '_')
+    prefix.pop_back();
+  return prefix;
+}
+
+} // anonymous namespace
+
+// Forward declaration.
+std::string GenerateMutualGenericStackCPS(
+    const std::vector<const FunctionDecl *> &FDs,
+    const std::unordered_map<std::string, BodyAnalysis> &Analyses,
+    const std::string &retType, const std::vector<std::string> &paramTypes,
+    const std::vector<std::string> &paramNames);
+
 std::string GenerateMutualCPS(
     const std::vector<const FunctionDecl *> &FDs) {
   if (FDs.empty())
@@ -662,20 +628,22 @@ std::string GenerateMutualCPS(
   const ASTContext *Ctx = &FDs[0]->getASTContext();
 
   // Require identical signatures (same return type and parameter types).
-  std::string retType = FDs[0]->getReturnType().getAsString();
+  std::string retType = NormalizeTypeName(FDs[0]->getReturnType().getAsString());
   std::vector<std::string> paramTypes;
   std::vector<std::string> paramNames;
   for (unsigned i = 0; i < FDs[0]->getNumParams(); ++i) {
-    paramTypes.push_back(FDs[0]->getParamDecl(i)->getType().getAsString());
+    paramTypes.push_back(
+        NormalizeTypeName(FDs[0]->getParamDecl(i)->getType().getAsString()));
     paramNames.push_back(FDs[0]->getParamDecl(i)->getNameAsString());
   }
   for (size_t f = 1; f < FDs.size(); ++f) {
-    if (FDs[f]->getReturnType().getAsString() != retType)
+    if (NormalizeTypeName(FDs[f]->getReturnType().getAsString()) != retType)
       return "";
     if (FDs[f]->getNumParams() != paramTypes.size())
       return "";
     for (unsigned i = 0; i < FDs[f]->getNumParams(); ++i) {
-      if (FDs[f]->getParamDecl(i)->getType().getAsString() != paramTypes[i])
+      if (NormalizeTypeName(FDs[f]->getParamDecl(i)->getType().getAsString()) !=
+          paramTypes[i])
         return "";
       if (FDs[f]->getParamDecl(i)->getNameAsString() != paramNames[i])
         return "";
@@ -686,34 +654,30 @@ std::string GenerateMutualCPS(
   std::unordered_map<std::string, BodyAnalysis> Analyses;
   for (const FunctionDecl *FD : FDs) {
     BodyAnalysis BA;
-    if (!AnalyzeBody(FD->getBody(), BA, Ctx))
+    bool isVoid = FD->getReturnType()->isVoidType();
+    if (!AnalyzeBody(FD->getBody(), BA, Ctx, FD->getNameAsString(), isVoid))
       return "";
     Analyses[FD->getNameAsString()] = BA;
   }
 
-  // Verify tail-recursive mutual calls.
+  // Determine whether all mutual calls are tail calls. If not, fall back to
+  // a generic-stack dispatcher.
+  bool allTailCalls = true;
   for (const FunctionDecl *FD : FDs) {
     const BodyAnalysis &BA = Analyses[FD->getNameAsString()];
     const Expr *RecExpr = BA.RecExpr;
     const CallExpr *CE = dyn_cast<CallExpr>(RecExpr);
     if (!CE)
-      return "";
-    const FunctionDecl *Callee = CE->getDirectCallee();
-    if (!Callee)
-      return "";
-    // The recursive return must be a direct call to another group member.
-    bool found = false;
-    for (const FunctionDecl *Other : FDs) {
-      if (Other->getNameAsString() == Callee->getNameAsString()) {
-        found = true;
-        break;
-      }
-    }
-    if (!found)
-      return "";
-    if (!IsInTailPosition(CE, FD->getBody(), FD->getNameAsString()))
-      return "";
+      allTailCalls = false;
+    else if (!IsInTailPosition(CE, FD->getBody(), FD->getNameAsString()))
+      allTailCalls = false;
+    if (!allTailCalls)
+      break;
   }
+
+  if (!allTailCalls)
+    return GenerateMutualGenericStackCPS(FDs, Analyses, retType, paramTypes,
+                                         paramNames);
 
   CodeEmitter e;
   e.raw("// === Generated mutual-recursion code ===\n\n");
@@ -725,9 +689,17 @@ std::string GenerateMutualCPS(
     e.raw("  " + FD->getNameAsString() + ",\n");
   e.raw("};\n\n");
 
+  // Dispatcher name: use common prefix if available, otherwise first function.
+  std::vector<std::string> names;
+  for (const FunctionDecl *FD : FDs)
+    names.push_back(FD->getNameAsString());
+  std::string prefix = CommonPrefix(names);
+  std::string dispatcherName = prefix.empty() ? names[0] : prefix;
+  dispatcherName += "_dispatch";
+
   // Dispatcher signature.
-  std::string sig = retType + " " + FDs[0]->getNameAsString() +
-                    "_dispatch(" + enumName + " tag";
+  std::string sig = retType + " " + dispatcherName +
+                    "(" + enumName + " tag";
   for (size_t i = 0; i < paramNames.size(); ++i)
     sig += ", " + paramTypes[i] + " " + paramNames[i];
   sig += ")";
@@ -772,9 +744,276 @@ std::string GenerateMutualCPS(
     }
     wrapperSig += ")";
     e.block(wrapperSig, [&](CodeEmitter &b) {
-      std::string call = "return " + FDs[0]->getNameAsString() +
-                         "_dispatch(" + enumName + "::" +
+      std::string call = "return " + dispatcherName +
+                         "(" + enumName + "::" +
                          FD->getNameAsString();
+      for (const auto &p : paramNames)
+        call += ", " + p;
+      call += ");";
+      b.line(call);
+    });
+    e.nl();
+  }
+
+  return e.str();
+}
+
+// ============================================================
+// Generic-stack mutual recursion dispatcher
+// ============================================================
+
+namespace {
+
+void CollectGroupHoles(
+    const Expr *E, const std::unordered_set<std::string> &GroupNames,
+    std::vector<CallExpr *> &Holes) {
+  if (!E)
+    return;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+      if (GroupNames.count(Callee->getNameAsString())) {
+        Holes.push_back(const_cast<CallExpr *>(CE));
+        return;
+      }
+    }
+  }
+  for (const Stmt *Child : E->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child))
+      CollectGroupHoles(ChildExpr, GroupNames, Holes);
+  }
+}
+
+bool ContainsGroupCall(
+    const Expr *E, const std::unordered_set<std::string> &GroupNames) {
+  if (!E)
+    return false;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+      if (GroupNames.count(Callee->getNameAsString()))
+        return true;
+    }
+  }
+  for (const Stmt *Child : E->children()) {
+    if (ContainsGroupCall(dyn_cast_or_null<Expr>(Child), GroupNames))
+      return true;
+  }
+  return false;
+}
+
+} // anonymous namespace
+
+std::string GenerateMutualGenericStackCPS(
+    const std::vector<const FunctionDecl *> &FDs,
+    const std::unordered_map<std::string, BodyAnalysis> &Analyses,
+    const std::string &retType, const std::vector<std::string> &paramTypes,
+    const std::vector<std::string> &paramNames) {
+  const ASTContext *Ctx = &FDs[0]->getASTContext();
+
+  std::unordered_set<std::string> groupNames;
+  for (const FunctionDecl *FD : FDs)
+    groupNames.insert(FD->getNameAsString());
+
+  // Precompute holes per function and combined expressions.
+  std::unordered_map<std::string, std::vector<CallExpr *>> HolesByFunc;
+  std::unordered_map<std::string, std::string> CombinedByFunc;
+  for (const FunctionDecl *FD : FDs) {
+    const std::string &name = FD->getNameAsString();
+    const BodyAnalysis &BA = Analyses.at(name);
+    std::vector<CallExpr *> holes;
+    CollectGroupHoles(BA.RecExpr, groupNames, holes);
+    if (holes.empty())
+      return "";
+    // Reject nested group calls inside hole arguments.
+    for (CallExpr *CE : holes) {
+      for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+        if (ContainsGroupCall(CE->getArg(i), groupNames))
+          return "";
+      }
+    }
+    HolesByFunc[name] = holes;
+    std::unordered_map<const Expr *, std::string> repls;
+    for (size_t i = 0; i < holes.size(); ++i)
+      repls[holes[i]] = "v" + std::to_string(i);
+    CombinedByFunc[name] =
+        StripOuterParens(PrintExprWithReplacements(BA.RecExpr, repls, Ctx));
+  }
+
+  // Identify tail-call members: their recursive expression is exactly one
+  // direct call to another group member. These can be dispatched without a
+  // combine marker.
+  std::unordered_map<std::string, bool> isTailByFunc;
+  for (const FunctionDecl *FD : FDs) {
+    const std::string &name = FD->getNameAsString();
+    const auto &holes = HolesByFunc[name];
+    isTailByFunc[name] =
+        (holes.size() == 1 && holes[0] == Analyses.at(name).RecExpr);
+  }
+
+  CodeEmitter e;
+  e.raw("// === Generated mutual-recursion code (generic stack) ===\n\n");
+  e.line("#include <vector>");
+  e.nl();
+
+  // Function tag enum.
+  std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
+  e.raw("enum class " + enumName + " {\n");
+  for (const FunctionDecl *FD : FDs)
+    e.raw("  " + FD->getNameAsString() + ",\n");
+  e.raw("};\n\n");
+
+  // Dispatcher name.
+  std::vector<std::string> names;
+  for (const FunctionDecl *FD : FDs)
+    names.push_back(FD->getNameAsString());
+  std::string prefix = CommonPrefix(names);
+  std::string dispatcherName = prefix.empty() ? names[0] : prefix;
+  dispatcherName += "_dispatch";
+
+  // Frame struct.
+  std::string frameName = dispatcherName + "Frame";
+  e.block("struct " + frameName, [&](CodeEmitter &b) {
+    b.line(enumName + " tag;");
+    for (size_t i = 0; i < paramNames.size(); ++i)
+      b.line(paramTypes[i] + " " + paramNames[i] + ";");
+    std::string ctor = frameName + "(" + enumName + " t";
+    for (size_t i = 0; i < paramNames.size(); ++i)
+      ctor += ", " + paramTypes[i] + " " + paramNames[i];
+    ctor += ") : tag(t)";
+    for (const auto &p : paramNames)
+      ctor += ", " + p + "(" + p + ")";
+    ctor += " {}";
+    b.line(ctor);
+  }, ";");
+  e.nl();
+
+  // Stack entry struct.
+  std::string entryName = dispatcherName + "StackEntry";
+  e.block("struct " + entryName, [&](CodeEmitter &b) {
+    b.line("enum class Tag { Frame, Marker } tag;");
+    b.line(frameName + " frame;");
+    b.line("int count;");
+    b.line(entryName + "(" + frameName + " f) : tag(Tag::Frame), " +
+           "frame(std::move(f)), count(0) {}");
+    b.line(entryName + "(int c, " + frameName + " f) : tag(Tag::Marker), " +
+           "frame(std::move(f)), count(c) {}");
+  }, ";");
+  e.nl();
+
+  // Dispatcher signature.
+  std::string sig = retType + " " + dispatcherName + "(" + enumName + " tag";
+  for (size_t i = 0; i < paramNames.size(); ++i)
+    sig += ", " + paramTypes[i] + " " + paramNames[i];
+  sig += ")";
+
+  e.block(sig, [&](CodeEmitter &b) {
+    b.line("std::vector<" + entryName + "> stack;");
+    {
+      std::string init = "stack.emplace_back(" + frameName + "(tag";
+      for (const auto &p : paramNames)
+        init += ", " + p;
+      init += "));";
+      b.line(init);
+    }
+    b.line("std::vector<" + retType + "> values;");
+
+    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
+      w.line("auto entry = stack.back();");
+      w.line("stack.pop_back();");
+      w.block("if (entry.tag == " + entryName + "::Tag::Marker)",
+              [&](CodeEmitter &iw) {
+        iw.line("auto cur = entry.frame;");
+        for (const auto &p : paramNames)
+          iw.line("auto " + p + " = cur." + p + ";");
+        if (paramNames.empty())
+          iw.line("(void)cur;");
+        iw.line(enumName + " ftag = cur.tag;");
+        for (size_t i = 0; i < FDs.size(); ++i) {
+          const std::string &name = FDs[i]->getNameAsString();
+          iw.line((i == 0 ? "if (" : "else if (") +
+                  std::string("ftag == ") + enumName + "::" + name + ") {");
+          iw.inc();
+          size_t hcount = HolesByFunc.at(name).size();
+          for (size_t j = 0; j < hcount; ++j) {
+            iw.line(retType + " v" + std::to_string(j) +
+                    " = values.back(); values.pop_back();");
+          }
+          iw.line("values.push_back(" + CombinedByFunc.at(name) + ");");
+          iw.dec();
+          iw.line("}");
+        }
+      });
+      w.block("else", [&](CodeEmitter &iw) {
+        iw.line("auto cur = entry.frame;");
+        for (const auto &p : paramNames)
+          iw.line("auto " + p + " = cur." + p + ";");
+        iw.line(enumName + " ftag = cur.tag;");
+        for (size_t fi = 0; fi < FDs.size(); ++fi) {
+          const FunctionDecl *FD = FDs[fi];
+          const std::string &name = FD->getNameAsString();
+          const BodyAnalysis &BA = Analyses.at(name);
+          iw.line((fi == 0 ? "if (" : "else if (") +
+                  std::string("ftag == ") + enumName + "::" + name + ") {");
+          iw.inc();
+          EmitStmts(iw, BA.LeadingStmts, Ctx);
+          for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
+            std::string prefix = (bi == 0) ? "if (" : "else if (";
+            const auto &bc = BA.BaseCases[bi];
+            iw.line(prefix + bc.CondStr + ")");
+            iw.inc();
+            iw.line("values.push_back(" + bc.ValueStr + ");");
+            iw.dec();
+          }
+          iw.line("else {");
+          iw.inc();
+          EmitStmts(iw, BA.MiddleStmts, Ctx);
+          const std::vector<CallExpr *> &holes = HolesByFunc.at(name);
+          if (isTailByFunc[name]) {
+            // Tail-call member: directly push the callee frame, no marker.
+            const CallExpr *CE = holes[0];
+            std::string push = "stack.emplace_back(" + frameName + "(" +
+                               enumName + "::" +
+                               CE->getDirectCallee()->getNameAsString();
+            for (unsigned a = 0;
+                 a < FD->getNumParams() && a < CE->getNumArgs(); ++a)
+              push += ", " + PrintExpr(CE->getArg(a), Ctx);
+            push += "));";
+            iw.line(push);
+          } else {
+            iw.line("stack.emplace_back(" + entryName + "(" +
+                    std::to_string(holes.size()) + ", cur));");
+            for (size_t hi = 0; hi < holes.size(); ++hi) {
+              std::string push = "stack.emplace_back(" + frameName + "(" +
+                                 enumName + "::" +
+                                 holes[hi]->getDirectCallee()->getNameAsString();
+              for (unsigned a = 0;
+                   a < FD->getNumParams() && a < holes[hi]->getNumArgs(); ++a)
+                push += ", " + PrintExpr(holes[hi]->getArg(a), Ctx);
+              push += "));";
+              iw.line(push);
+            }
+          }
+          iw.dec();
+          iw.line("}");
+          iw.dec();
+          iw.line("}");
+        }
+      });
+    });
+    b.line("return values.back();");
+  });
+  e.nl();
+
+  // Wrapper functions.
+  for (const FunctionDecl *FD : FDs) {
+    std::string wrapperSig = retType + " " + FD->getNameAsString() + "(";
+    for (size_t i = 0; i < paramNames.size(); ++i) {
+      if (i > 0) wrapperSig += ", ";
+      wrapperSig += paramTypes[i] + " " + paramNames[i];
+    }
+    wrapperSig += ")";
+    e.block(wrapperSig, [&](CodeEmitter &b) {
+      std::string call = "return " + dispatcherName +
+                         "(" + enumName + "::" + FD->getNameAsString();
       for (const auto &p : paramNames)
         call += ", " + p;
       call += ");";

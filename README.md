@@ -42,6 +42,16 @@ make -j$(sysctl -n hw.ncpu)
 
 ```bash
 python3 run_tests.py
+python3 tests/fuzz_regressions.py   # 随机回归 fuzzing
+```
+
+### CLI 选项
+
+```bash
+./cps-transpiler input.cc --explain --                    # 打印规则选择
+./cps-transpiler input.cc --rule GenericStackRule --      # 强制使用某条规则
+./cps-transpiler input.cc --function fib --               # 只转换指定函数
+./cps-transpiler input.cc -o output.cc --                 # 输出到文件
 ```
 
 ---
@@ -125,6 +135,30 @@ int mod2(int n) {
 
 ---
 
+## Showcase 3：非尾调用相互递归
+
+输入：相互递归且结果需要后处理
+
+```cpp
+int f(int n);
+int g(int n) {
+  if (n == 0) return 0;
+  return f(n - 1);
+}
+int f(int n) {
+  if (n == 0) return 1;
+  return 1 + g(n - 1);
+}
+```
+
+输出特点：
+- 由于 `f` 的递归调用不是尾调用，生成**通用栈 dispatcher**。
+- `g` 是尾调用成员，dispatcher 会跳过 Marker 直接压入 `f` 的帧；只有 `f` 才会压入 Marker 并在返回后执行 `1 + v0` 合并。
+
+完整文件见 [`tests/test_input_mutual_nontail.cc`](tests/test_input_mutual_nontail.cc)。
+
+---
+
 ## 支持的转换规则
 
 转换器内部维护一条**有序规则链**。对同一个递归函数，按下面的顺序匹配，第一个适用的规则获胜。
@@ -134,11 +168,14 @@ int mod2(int n) {
 | 1 | **TailRecursionRule** | 所有递归调用都处于尾部位置 | `while (1)` + 参数重赋值 | `clamp_down(n-1)` |
 | 2 | **AccumulatorRule** | 单递归调用与可结合运算组合 | `while` + 累加器/累乘器 | `n * fact(n-1)` |
 | 3 | **TuplingRule** | k 阶线性齐次递推 | O(n) 数组/元组循环 | `fib(n)=fib(n-1)+fib(n-2)` |
-| 4 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接 | 显式帧栈 | `fib(n-1)+fib(n-2)` |
-| 5 | **GenericStackRule** | 任意直接递归表达式 | `std::variant` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
-| 6 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
+| 4 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
+| 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接 | 显式帧栈 | `fib(n-1)+fib(n-2)` |
+| 6 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
+| 7 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
 
-规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule 不会输给 BinaryStackRule，AccumulatorRule 不会输给 GenericStackRule。
+规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule / MemoizationRule 不会输给 BinaryStackRule / GenericStackRule，AccumulatorRule 不会输给 GenericStackRule。
+
+可以通过 `--explain` 查看每个函数最终使用了哪条规则，通过 `--rule=<name>` 强制使用某条规则。
 
 ---
 
@@ -312,6 +349,37 @@ int acc_multi_base(int n) {
 }
 ```
 
+### 6. 非齐次递推 → Memoization DP
+
+输入：
+
+```cpp
+int memo_weird(int n) {
+  if (n <= 1) return n;
+  return memo_weird(n - 1) + 2 * memo_weird(n - 2) + 1;
+}
+```
+
+输出：
+
+```cpp
+#include <vector>
+
+int memo_weird(int n) {
+  if (n <= 1) {
+    if (n <= 1) return n;
+    return 0;
+  }
+  std::vector<int> dp(n + 1);
+  dp[0] = 0;
+  dp[1] = 1;
+  for (int i = 2; i <= n; ++i) {
+    dp[i] = ((dp[i - 1] + (2 * dp[i - 2])) + 1);
+  }
+  return dp[n];
+}
+```
+
 ---
 
 ## 工作原理
@@ -335,13 +403,14 @@ int acc_multi_base(int n) {
   - 提取 recursive return     │
      |                       │
      v                       │
-[按优先级尝试转换规则]         │
+[按代价选择转换规则]           │
   1. TailRecursionRule       │
   2. AccumulatorRule         │
   3. TuplingRule             │
-  4. BinaryStackRule         │
-  5. GenericStackRule        │
-  6. DefunctionalizedRule ◄──┘
+  4. MemoizationRule         │
+  5. BinaryStackRule         │
+  6. GenericStackRule        │
+  7. DefunctionalizedRule ◄──┘
      |
      v
 [代码生成] 输出迭代 C++ 代码
@@ -396,13 +465,15 @@ public:
 识别如下形式：
 
 ```cpp
-return f(new_args) op step;   // op 为 + * | ^
+return f(new_args) op step;   // op 为 + - * | ^
 return step op f(new_args);
 return min(f(new_args), step);
 return max(f(new_args), step);
 ```
 
-其中 `step` 不依赖递归结果。生成 `while` 循环保存中间结果；变量名根据运算选择（`sum`、`product`、`bits`、`xors`、`min_val`、`max_val`）。
+其中 `step` 不依赖递归结果。生成 `while` 循环保存中间结果；变量名根据运算选择（`sum`、`diff`、`product`、`bits`、`xors`、`min_val`、`max_val`）。
+
+`leading` 语句只执行一次，放在循环之前。
 
 支持多个 base case，但要求它们的返回值相同且不依赖参数（从而可作为累加器的 identity）。循环条件是所有 base case 都不满足：
 
@@ -420,6 +491,16 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k)
 
 当前要求系数 `ci ∈ {+1, -1}`，且每个阶 `1..k` 恰好出现一次。生成 `std::array<int, k>` 保存最近 k 个值，从 `i = k` 线性递推到 `n`，时间复杂度 O(n)、空间复杂度 O(k)。
 
+#### MemoizationRule
+
+识别含重叠子问题的 k 阶线性递推：
+
+```cpp
+f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k) + const
+```
+
+系数可以是任意小整数，允许常数项。要求所有递归调用都是 `f(n - c)` 形式（c 为正整数），且 base cases 覆盖 `0..max(c)-1`。生成自底向上的 `std::vector<RetType> dp(n+1)`，时间复杂度 O(n)、空间复杂度 O(n)。该规则是 TuplingRule 的更通用版本，用于非齐次或系数非 ±1 的递推。
+
 #### BinaryStackRule
 
 当递归表达式恰好是 `f(a) op f(b)`，且 `op` 为 `+` `*` `|` `^` 时，生成一个只存储参数的帧栈。利用该运算符的结合性，在 DFS 遍历子树时直接累加 `result`，无需额外的值栈。优点是代码简洁、开销小。
@@ -428,8 +509,9 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k)
 
 处理任意直接递归表达式。算法核心是“双栈 DFS”：
 
-- **工作栈** `stack<std::variant<Frame, CombineMarker>>`：存储待计算的帧，以及一个专用标记 `CombineMarker{count}`，表示当前帧需要弹出多少个递归结果进行合并。
+- **工作栈** `stack<StackEntry>`：每个 entry 带一个 `enum Tag { Frame, Marker }` 标签，Marker 记录需要弹出多少个递归结果进行合并。
 - **值栈** `values`：存储已经计算好的子结果。
+- **局部变量捕获**：middle statements 中声明并被递归表达式引用的局部变量（如 `int s = 0; for (...) s += i; return f(n-1) + s;`）会被自动保存到栈帧，保证合并结果时变量仍然可用。
 
 遍历过程：
 
@@ -451,12 +533,15 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k)
 
 ### 3. 代码生成
 
-所有规则共享一套代码生成基础设施：
+所有规则共享一套代码生成基础设施与 AST 辅助函数：
 
 - `CodeEmitter`：轻量级缩进管理器，支持 `line`、`block`、`raw` 等操作。
-- `PrintExpr` / `PrintExprWithReplacements`：把 Clang AST 表达式打印回 C++ 源码，后者支持把指定子表达式替换为变量名。
-- `CollectHoles`：在表达式中收集所有直接递归调用，不进入递归调用自身的参数。
-- `BuildFunctionSignature` / `EmitFrameStruct`：生成函数签名和参数帧结构体。
+- `PrintExpr` / `PrintExprWithReplacements`（`cps_generator.cc`）：把 Clang AST 表达式打印回 C++ 源码，后者支持把指定子表达式替换为变量名。
+- `transformation_rules_helpers` 提供的共享辅助函数：
+  - `CollectHoles`：在表达式中收集所有直接递归调用，不进入递归调用自身的参数。
+  - `IsInTailPosition` / `ContainsRecursiveCall` / `ExprUsesParams` / `IsPureExpr` 等：供规则与生成器统一使用的 AST 分析工具。
+  - `ContainsWholeWord` / `ReplaceWholeWord`：生成代码时使用的整词标识符查找/替换工具。
+- `BuildFunctionSignature` / `EmitFrameStruct`（`cps_generator.cc`）：生成函数签名和参数帧结构体。
 
 ---
 
@@ -471,13 +556,22 @@ cps/
 ├── benchmarks/               # 性能对比脚本
 ├── tests/
 │   ├── test_input_*.cc       # 测试输入
-│   └── example_output_*.cc   # 期望输出样例
+│   ├── example_output_*.cc   # 期望输出样例
+│   └── fuzz_regressions.py   # 随机回归 fuzzing
 └── src/
-    ├── main.cc               # Clang Tooling 前端
-    ├── cps_generator.h/.cc   # AST 分析、代码生成入口、共享 helper
-    ├── code_emitter.h         # 缩进管理代码生成器
-    ├── transformation_rule.h  # BodyAnalysis、GenContext、规则接口
-    └── transformation_rules.h/.cc  # 具体规则实现
+    ├── main.cc                       # Clang Tooling 前端
+    ├── cps_generator.h/.cc           # AST 分析、代码生成入口
+    ├── code_emitter.h                # 缩进管理代码生成器
+    ├── transformation_rule.h         # BodyAnalysis、GenContext、规则接口
+    ├── transformation_rules.h/.cc    # CreateDefaultRules()
+    ├── transformation_rules_helpers.h/.cc  # 规则与生成器共享的 AST 辅助函数（尾位置检测、递归调用收集、纯度分析、参数使用分析、整词替换等）
+    ├── transformation_rule_tail.cc   # TailRecursionRule
+    ├── transformation_rule_acc.cc    # AccumulatorRule
+    ├── transformation_rule_tupling.cc
+    ├── transformation_rule_memo.cc
+    ├── transformation_rule_binary.cc
+    ├── transformation_rule_generic.cc
+    └── transformation_rule_defun.cc
 ```
 
 ---
@@ -486,23 +580,25 @@ cps/
 
 ### ✅ 已支持
 
-- 单参数 / 多参数函数，返回基本类型（如 `int`）
+- 单参数 / 多参数函数，返回基本类型（`int`、`long long`、`unsigned`、`bool`、`void` 等）
 - 参数类型为值、指针、引用
-- 函数体形式：`[leading] (if-return | switch-return)* [middle] return recursive-expr;`
+- 函数体形式：`[leading] (if-return | switch-return)* [middle] return recursive-expr;`，也支持 `return cond ? base : rec;`
+- guard early return（如 `if (n < 0) return 0;`）会随 base case 一起处理
+- middle statements 支持 `for` / `while` / do-while` 循环；循环体中声明的局部变量若被递归表达式引用，会被 GenericStackRule 自动捕获到栈帧
 - 递归调用可嵌套在**任意表达式**中：二元/一元运算符、函数调用、条件表达式、数组下标等
 - 双边递归、单边递归、纯尾递归
 - 多个 base case（if-else-if 链或 switch case），包括 accumulator 规则下的多 base case
 - 常见可结合运算的 accumulator 转换：`+`、`*`、`|`、`^`、`min`、`max`
 - k 阶线性递推的 tupling 转换
 - 嵌套递归（递归调用的参数仍是递归调用）
-- 相互递归（尾调用形式、相同签名的函数组）
+- 相互递归（相同签名的函数组；全尾调用组走枚举 dispatcher，混合组走通用栈 dispatcher 并对尾调用成员做零 Marker 优化）
 - 副作用纯度分析：含副作用的表达式自动降级到保持求值顺序的显式栈规则
 
 ### 🚧 限制
 
 - 只支持**直接递归**与**相互递归**；不支持函数指针、虚函数等动态分发递归
 - TuplingRule 目前仅支持系数为 `±1` 的线性递推
-- 相互递归要求函数签名相同且为尾调用形式
+- 相互递归要求函数签名相同
 - 更复杂的控制流（循环、异常、goto）不支持
 - 生成的代码风格偏向机械翻译，可读性仍有提升空间
 

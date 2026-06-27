@@ -24,6 +24,33 @@ static llvm::cl::OptionCategory TranspilerCategory("cps-transpiler options");
 static cl::opt<std::string> OutputFile("o", cl::desc("Output file"),
                                         cl::value_desc("filename"),
                                         cl::cat(TranspilerCategory));
+static cl::opt<std::string> ForceRule(
+    "rule", cl::desc("Force a specific transformation rule (e.g., TuplingRule, GenericStackRule)"),
+    cl::value_desc("rule-name"), cl::cat(TranspilerCategory));
+static cl::opt<bool> ExplainSelection(
+    "explain", cl::desc("Print which rule was selected for each function"),
+    cl::init(false), cl::cat(TranspilerCategory));
+static cl::list<std::string> TargetFunctions(
+    "function", cl::desc("Only transform the specified functions (can be repeated)"),
+    cl::value_desc("name"), cl::cat(TranspilerCategory));
+
+// === Parsed transpiler options ===
+struct TranspilerOptions {
+  std::string OutputFile;
+  std::string ForceRule;
+  bool ExplainSelection = false;
+  std::unordered_set<std::string> TargetFunctions;
+};
+
+static TranspilerOptions BuildOptions() {
+  TranspilerOptions Opts;
+  Opts.OutputFile = OutputFile;
+  Opts.ForceRule = ForceRule;
+  Opts.ExplainSelection = ExplainSelection;
+  for (const auto &Name : ::TargetFunctions)
+    Opts.TargetFunctions.insert(Name);
+  return Opts;
+}
 
 // === AST Visitor: collect function definitions ===
 class FunctionCollector : public RecursiveASTVisitor<FunctionCollector> {
@@ -60,7 +87,7 @@ FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> 
   std::vector<std::vector<std::string>> SCCs;
   std::unordered_map<std::string, int> Index;
   std::unordered_map<std::string, int> LowLink;
-  std::unordered_map<std::string, bool> OnStack;
+  std::unordered_set<std::string> OnStack;
   std::vector<std::string> Stack;
   int idx = 0;
 
@@ -70,7 +97,7 @@ FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> 
     LowLink[Name] = idx;
     ++idx;
     Stack.push_back(Name);
-    OnStack[Name] = true;
+    OnStack.insert(Name);
 
     auto It = Graph.find(Name);
     if (It != Graph.end()) {
@@ -80,7 +107,7 @@ FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> 
         if (!Index.count(Next)) {
           strongconnect(Next);
           LowLink[Name] = std::min(LowLink[Name], LowLink[Next]);
-        } else if (OnStack[Next]) {
+        } else if (OnStack.count(Next)) {
           LowLink[Name] = std::min(LowLink[Name], Index[Next]);
         }
       }
@@ -91,7 +118,7 @@ FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> 
       while (true) {
         std::string W = Stack.back();
         Stack.pop_back();
-        OnStack[W] = false;
+        OnStack.erase(W);
         SCC.push_back(W);
         if (W == Name) break;
       }
@@ -109,71 +136,183 @@ FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> 
 // === AST Consumer ===
 class CPSConsumer : public ASTConsumer {
 public:
-  explicit CPSConsumer(ASTContext *Context) : Context(Context) {}
+  explicit CPSConsumer(const TranspilerOptions &Opts) : Opts(Opts) {}
 
   void HandleTranslationUnit(ASTContext &Context) override {
-    FunctionCollector Collector;
-    Collector.TraverseDecl(Context.getTranslationUnitDecl());
-
-    std::vector<FunctionDecl *> Functions = Collector.getFunctions();
-    std::unordered_map<std::string, FunctionDecl *> FuncByName;
-    for (FunctionDecl *FD : Functions)
-      FuncByName[FD->getNameAsString()] = FD;
-
-    // Build call graph among defined functions.
-    std::unordered_map<std::string, std::unordered_set<std::string>> CallGraph;
-    for (FunctionDecl *FD : Functions) {
-      std::unordered_set<std::string> Callees;
-      CollectCallees(FD->getBody(), Callees);
-      CallGraph[FD->getNameAsString()] = Callees;
-    }
-
+    auto Functions = collectFunctions(Context);
+    auto FuncByName = buildFunctionMap(Functions);
+    auto CallGraph = buildCallGraph(Functions);
     auto SCCs = FindSCCs(CallGraph);
 
+    std::vector<std::string> generated;
     for (const auto &SCC : SCCs) {
       if (SCC.size() == 1) {
-        const std::string &Name = SCC[0];
-        auto It = CallGraph.find(Name);
-        if (It == CallGraph.end() || !It->second.count(Name))
-          continue; // not self-recursive
-        FunctionDecl *FD = FuncByName[Name];
-        llvm::outs() << "[Detected recursive function] " << Name << "\n";
-        std::string generated = cps::GenerateCPS(FD);
-        if (!generated.empty())
-          GeneratedCode.push_back(generated);
+        processSingleFunction(SCC[0], CallGraph, FuncByName, generated);
       } else {
-        // Mutual recursion group.
-        std::vector<const FunctionDecl *> Group;
-        for (const std::string &Name : SCC) {
-          llvm::outs() << "[Detected recursive function] " << Name << "\n";
-          Group.push_back(FuncByName[Name]);
-        }
-        std::string generated = cps::GenerateMutualCPS(Group);
-        if (!generated.empty())
-          GeneratedCode.push_back(generated);
+        processMutualGroup(SCC, FuncByName, generated);
       }
     }
 
-    llvm::outs() << "\n// ================================\n";
-    llvm::outs() << "// Generated iterative code\n";
-    llvm::outs() << "// ================================\n\n";
-    for (const auto &code : GeneratedCode) {
-      llvm::outs() << code << "\n\n";
-    }
+    warnMissingTargets(FuncByName);
+    writeOutput(generated);
   }
 
 private:
-  ASTContext *Context;
-  std::vector<std::string> GeneratedCode;
+  TranspilerOptions Opts;
+
+  std::vector<FunctionDecl *> collectFunctions(ASTContext &Context) {
+    FunctionCollector Collector;
+    Collector.TraverseDecl(Context.getTranslationUnitDecl());
+    return Collector.getFunctions();
+  }
+
+  std::unordered_map<std::string, FunctionDecl *>
+  buildFunctionMap(const std::vector<FunctionDecl *> &Functions) {
+    std::unordered_map<std::string, FunctionDecl *> Map;
+    for (FunctionDecl *FD : Functions)
+      Map[FD->getNameAsString()] = FD;
+    return Map;
+  }
+
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+  buildCallGraph(const std::vector<FunctionDecl *> &Functions) {
+    std::unordered_map<std::string, std::unordered_set<std::string>> Graph;
+    for (FunctionDecl *FD : Functions) {
+      std::unordered_set<std::string> Callees;
+      CollectCallees(FD->getBody(), Callees);
+      Graph[FD->getNameAsString()] = Callees;
+    }
+    return Graph;
+  }
+
+  bool isTarget(const std::string &Name) const {
+    return Opts.TargetFunctions.empty() || Opts.TargetFunctions.count(Name);
+  }
+
+  void processSingleFunction(
+      const std::string &Name,
+      const std::unordered_map<std::string, std::unordered_set<std::string>> &CallGraph,
+      const std::unordered_map<std::string, FunctionDecl *> &FuncByName,
+      std::vector<std::string> &GeneratedCode) {
+    auto It = CallGraph.find(Name);
+    if (It == CallGraph.end() || !It->second.count(Name))
+      return; // not self-recursive
+    if (!isTarget(Name)) {
+      llvm::outs() << "[Skipping] " << Name << " (not in --function list)\n";
+      return;
+    }
+
+    auto FDIt = FuncByName.find(Name);
+    if (FDIt == FuncByName.end())
+      return;
+    FunctionDecl *FD = FDIt->second;
+    llvm::outs() << "[Detected recursive function] " << Name << "\n";
+    std::string generated = cps::GenerateCPS(FD, Opts.ForceRule, Opts.ExplainSelection);
+    if (!generated.empty()) {
+      GeneratedCode.push_back(generated);
+    } else {
+      llvm::errs() << "[cps-transpiler] Failed to transform " << Name
+                   << " (no applicable rule or unsupported body shape)\n";
+    }
+  }
+
+  void processMutualGroup(
+      const std::vector<std::string> &SCC,
+      const std::unordered_map<std::string, FunctionDecl *> &FuncByName,
+      std::vector<std::string> &GeneratedCode) {
+    for (const std::string &Name : SCC) {
+      if (!isTarget(Name)) {
+        for (const std::string &N : SCC)
+          llvm::outs() << "[Skipping] " << N
+                       << " (mutual group not fully in --function list)\n";
+        return;
+      }
+    }
+
+    std::vector<const FunctionDecl *> Group;
+    for (const std::string &Name : SCC) {
+      auto It = FuncByName.find(Name);
+      if (It == FuncByName.end())
+        return;
+      llvm::outs() << "[Detected recursive function] " << Name << "\n";
+      Group.push_back(It->second);
+    }
+
+    std::string generated = cps::GenerateMutualCPS(Group);
+    if (!generated.empty()) {
+      GeneratedCode.push_back(generated);
+    } else {
+      llvm::errs() << "[cps-transpiler] Failed to transform mutual group: ";
+      for (size_t i = 0; i < SCC.size(); ++i) {
+        if (i > 0) llvm::errs() << ", ";
+        llvm::errs() << SCC[i];
+      }
+      llvm::errs() << "\n";
+    }
+  }
+
+  void warnMissingTargets(
+      const std::unordered_map<std::string, FunctionDecl *> &FuncByName) const {
+    if (Opts.TargetFunctions.empty())
+      return;
+    for (const std::string &Name : Opts.TargetFunctions) {
+      if (!FuncByName.count(Name))
+        llvm::errs() << "[cps-transpiler] Warning: --function target not found: "
+                     << Name << "\n";
+    }
+  }
+
+  void writeOutput(const std::vector<std::string> &GeneratedCode) const {
+    std::string output;
+    output += "\n// ================================\n";
+    output += "// Generated iterative code\n";
+    output += "// ================================\n\n";
+    for (const auto &code : GeneratedCode) {
+      output += code;
+      output += "\n\n";
+    }
+
+    if (!Opts.OutputFile.empty()) {
+      std::error_code EC;
+      llvm::raw_fd_ostream OS(Opts.OutputFile, EC, llvm::sys::fs::OF_Text);
+      if (EC) {
+        llvm::errs() << "Error opening output file: " << EC.message() << "\n";
+        llvm::outs() << output;
+        return;
+      }
+      OS << output;
+      OS.flush();
+      llvm::outs() << "Wrote generated code to " << Opts.OutputFile << "\n";
+    } else {
+      llvm::outs() << output;
+    }
+  }
 };
 
 // === Frontend Action ===
 class CPSFrontendAction : public ASTFrontendAction {
 public:
+  explicit CPSFrontendAction(const TranspilerOptions &Opts) : Opts(Opts) {}
+
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
                                                   StringRef file) override {
-    return std::make_unique<CPSConsumer>(&CI.getASTContext());
+    return std::make_unique<CPSConsumer>(Opts);
   }
+
+private:
+  TranspilerOptions Opts;
+};
+
+class CPSFrontendActionFactory : public FrontendActionFactory {
+public:
+  explicit CPSFrontendActionFactory(const TranspilerOptions &Opts) : Opts(Opts) {}
+
+  std::unique_ptr<FrontendAction> create() override {
+    return std::make_unique<CPSFrontendAction>(Opts);
+  }
+
+private:
+  TranspilerOptions Opts;
 };
 
 // === Main ===
@@ -191,5 +330,7 @@ int main(int argc, const char **argv) {
   ClangTool Tool(OptionsParser.getCompilations(),
                  OptionsParser.getSourcePathList());
 
-  return Tool.run(newFrontendActionFactory<CPSFrontendAction>().get());
+  TranspilerOptions Opts = BuildOptions();
+  CPSFrontendActionFactory Factory(Opts);
+  return Tool.run(&Factory);
 }

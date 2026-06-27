@@ -24,6 +24,14 @@ set(SOURCES
   src/main.cc
   src/cps_generator.cc
   src/transformation_rules.cc
+  src/transformation_rules_helpers.cc
+  src/transformation_rule_tail.cc
+  src/transformation_rule_acc.cc
+  src/transformation_rule_tupling.cc
+  src/transformation_rule_memo.cc
+  src/transformation_rule_binary.cc
+  src/transformation_rule_generic.cc
+  src/transformation_rule_defun.cc
 )
 
 add_executable(cps-transpiler ${SOURCES})

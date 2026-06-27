@@ -566,6 +566,198 @@ int main() {
             "mod0(8) = 0, mod1(8) = 0, mod2(8) = 1",
         ],
     },
+    {
+        "name": "memo",
+        "input": "tests/test_input_memo.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "memo_weird(" << i << ") = " << memo_weird(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "memo_weird(0) = 0",
+            "memo_weird(1) = 1",
+            "memo_weird(2) = 2",
+            "memo_weird(3) = 5",
+            "memo_weird(4) = 10",
+            "memo_weird(5) = 21",
+            "memo_weird(6) = 42",
+            "memo_weird(7) = 85",
+            "memo_weird(8) = 170",
+        ],
+    },
+    {
+        "name": "types",
+        "input": "tests/test_input_types.cc",
+        "main": """
+#include <iostream>
+int main() {
+  std::cout << "fib_ll(10) = " << fib_ll(10) << std::endl;
+  std::cout << "fact_unsigned(5) = " << fact_unsigned(5) << std::endl;
+  for (unsigned i = 0; i <= 5; ++i) {
+    std::cout << "is_even(" << i << ") = " << is_even(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "fib_ll(10) = 55",
+            "fact_unsigned(5) = 120",
+            "is_even(0) = 1",
+            "is_even(1) = 0",
+            "is_even(2) = 1",
+            "is_even(3) = 0",
+            "is_even(4) = 1",
+            "is_even(5) = 0",
+        ],
+    },
+    {
+        "name": "ternary",
+        "input": "tests/test_input_ternary.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "fact_t(" << i << ") = " << fact_t(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "fact_t(0) = 1",
+            "fact_t(1) = 1",
+            "fact_t(2) = 2",
+            "fact_t(3) = 6",
+            "fact_t(4) = 24",
+            "fact_t(5) = 120",
+            "fact_t(6) = 720",
+            "fact_t(7) = 5040",
+            "fact_t(8) = 40320",
+        ],
+    },
+    {
+        "name": "guard",
+        "input": "tests/test_input_guard.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = -3; i <= 8; ++i) {
+    std::cout << "fact_guard(" << i << ") = " << fact_guard(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "fact_guard(-3) = -1",
+            "fact_guard(-2) = -1",
+            "fact_guard(-1) = -1",
+            "fact_guard(0) = 1",
+            "fact_guard(1) = 1",
+            "fact_guard(2) = 2",
+            "fact_guard(3) = 6",
+            "fact_guard(4) = 24",
+            "fact_guard(5) = 120",
+            "fact_guard(6) = 720",
+            "fact_guard(7) = 5040",
+            "fact_guard(8) = 40320",
+        ],
+    },
+    {
+        "name": "void",
+        "input": "tests/test_input_void.cc",
+        "preamble": "int emitted[100];\nint emitted_count = 0;\nvoid emit(int x) { emitted[emitted_count++] = x; }\n",
+        "main": """
+#include <iostream>
+int main() {
+  print_down(5);
+  for (int i = 0; i < emitted_count; ++i) {
+    std::cout << "emit[" << i << "] = " << emitted[i] << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "emit[0] = 5",
+            "emit[1] = 4",
+            "emit[2] = 3",
+            "emit[3] = 2",
+            "emit[4] = 1",
+        ],
+    },
+    {
+        "name": "mutual_nontail",
+        "input": "tests/test_input_mutual_nontail.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 6; ++i) {
+    std::cout << "f(" << i << ") = " << f(i) << ", g(" << i << ") = " << g(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "f(0) = 1, g(0) = 0",
+            "f(1) = 1, g(1) = 1",
+            "f(2) = 2, g(2) = 1",
+            "f(3) = 2, g(3) = 2",
+            "f(4) = 3, g(4) = 2",
+            "f(5) = 3, g(5) = 3",
+            "f(6) = 4, g(6) = 3",
+        ],
+    },
+    {
+        "name": "sub",
+        "input": "tests/test_input_sub.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "sub_acc(" << i << ") = " << sub_acc(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "sub_acc(0) = 1",
+            "sub_acc(1) = 1",
+            "sub_acc(2) = -1",
+            "sub_acc(3) = -4",
+            "sub_acc(4) = -8",
+            "sub_acc(5) = -13",
+            "sub_acc(6) = -19",
+            "sub_acc(7) = -26",
+            "sub_acc(8) = -34",
+        ],
+    },
+    {
+        "name": "middle_loop",
+        "input": "tests/test_input_middle_loop.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "sum_loop(" << i << ") = " << sum_loop(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "sum_loop(0) = 0",
+            "sum_loop(1) = 1",
+            "sum_loop(2) = 2",
+            "sum_loop(3) = 5",
+            "sum_loop(4) = 11",
+            "sum_loop(5) = 21",
+            "sum_loop(6) = 36",
+            "sum_loop(7) = 57",
+            "sum_loop(8) = 85",
+        ],
+    },
 ]
 
 

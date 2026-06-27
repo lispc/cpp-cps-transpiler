@@ -8,7 +8,10 @@ namespace cps {
 
 // Generate iterative code for a recursive function.
 // Returns the complete generated C++ code block as a string.
-std::string GenerateCPS(const clang::FunctionDecl *FD);
+// If ForceRule is non-empty, only that rule is considered.
+std::string GenerateCPS(const clang::FunctionDecl *FD,
+                        const std::string &ForceRule = "",
+                        bool ExplainSelection = false);
 
 // Generate iterative code for a group of mutually recursive functions.
 // Currently supports tail-recursive mutual recursion with identical signatures.
