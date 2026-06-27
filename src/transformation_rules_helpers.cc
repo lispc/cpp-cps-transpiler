@@ -85,31 +85,6 @@ bool IsIdentifierBoundary(char c) {
   return !std::isalnum(static_cast<unsigned char>(c)) && c != '_';
 }
 
-bool ContainsCall(const Stmt *Root, const CallExpr *Target) {
-  if (!Root)
-    return false;
-  if (Root == Target)
-    return true;
-  for (const Stmt *Child : Root->children()) {
-    if (ContainsCall(Child, Target))
-      return true;
-  }
-  return false;
-}
-
-const Stmt *FindDirectChildStmtContainingCall(const Stmt *Root,
-                                              const CallExpr *Target) {
-  if (!Root)
-    return nullptr;
-  for (const Stmt *Child : Root->children()) {
-    if (!Child)
-      continue;
-    if (Child == Target || ContainsCall(Child, Target))
-      return Child;
-  }
-  return nullptr;
-}
-
 } // anonymous namespace
 
 bool IdentifierUsedInCode(const std::string &Code,
