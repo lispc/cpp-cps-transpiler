@@ -937,6 +937,29 @@ int main() {
         ],
     },
     {
+        "name": "is_pure",
+        "input": "tests/test_input_is_pure.cc",
+        "preamble": "struct Expr {\n  int kind;\n  Expr *args[3];\n  int arg_count;\n};\n",
+        "main": """
+#include <iostream>
+int main() {
+  Expr a{0, {nullptr, nullptr, nullptr}, 0};
+  Expr b{0, {nullptr, nullptr, nullptr}, 0};
+  Expr c{1, {nullptr, nullptr, nullptr}, 0}; // impure call
+  Expr n2{2, {&a, &b, nullptr}, 2};
+  Expr root1{2, {&n2, &c, nullptr}, 2};
+  Expr root2{2, {&n2, &a, nullptr}, 2};
+  std::cout << "is_pure(root1) = " << is_pure(&root1) << std::endl;
+  std::cout << "is_pure(root2) = " << is_pure(&root2) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "is_pure(root1) = 0",
+            "is_pure(root2) = 1",
+        ],
+    },
+    {
         "name": "tree_holes",
         "input": "tests/test_input_tree_holes.cc",
         "preamble": "struct TreeNode;\n\nstruct NodeList {\n  TreeNode *data[10];\n  int size;\n  NodeList() : size(0) {}\n  void push_back(TreeNode *x) { data[size++] = x; }\n  TreeNode **begin() { return data; }\n  TreeNode **end() { return data + size; }\n\n  struct RevIt {\n    TreeNode **p;\n    TreeNode *&operator*() { return *(p - 1); }\n    RevIt &operator++() { --p; return *this; }\n    bool operator!=(const RevIt &o) const { return p != o.p; }\n  };\n  RevIt rbegin() { return RevIt{data + size}; }\n  RevIt rend() { return RevIt{data}; }\n\n  struct CRevIt {\n    TreeNode *const *p;\n    TreeNode *const &operator*() { return *(p - 1); }\n    CRevIt &operator++() { --p; return *this; }\n    bool operator!=(const CRevIt &o) const { return p != o.p; }\n  };\n  CRevIt rbegin() const { return CRevIt{data + size}; }\n  CRevIt rend() const { return CRevIt{data}; }\n};\n\nstruct IntList {\n  int data[100];\n  int size;\n  IntList() : size(0) {}\n  void push_back(int x) { data[size++] = x; }\n  int operator[](int i) const { return data[i]; }\n  int get_size() const { return size; }\n};\n\nstruct TreeNode {\n  int value;\n  NodeList children;\n};\n",
