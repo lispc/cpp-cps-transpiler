@@ -330,7 +330,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
       }
     }
     if (FinalRet && !IsVoid) {
-      std::string txt = PrintStmt(FinalRet, Ctx.ASTCtx);
+      std::string txt = NormalizeIndentation(PrintStmt(FinalRet, Ctx.ASTCtx));
       if (!txt.empty()) {
         txt = EnsureSemicolon(txt);
         b.line(txt);
