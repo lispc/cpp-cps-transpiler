@@ -22,8 +22,8 @@ include_directories(${CLANG_INCLUDE_DIRS})
 
 set(SOURCES
   src/main.cc
-  src/recursion_detector.cc
   src/cps_generator.cc
+  src/transformation_rules.cc
 )
 
 add_executable(cps-transpiler ${SOURCES})

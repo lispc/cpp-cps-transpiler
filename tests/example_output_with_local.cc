@@ -1,16 +1,18 @@
-[Detected recursive function] fact
+[Detected recursive function] with_local
 
 // ================================
 // Generated iterative code
 // ================================
 
-// === Generated accumulator code for function: fact ===
+// === Generated accumulator code for function: with_local ===
 
-int fact(int n) {
+int with_local(int n) {
   int acc = 1;
   while (!(n <= 1)) {
+    auto m = n - 1;
+
     acc = acc * n;
-    auto new_n = n - 1;
+    auto new_n = m;
     n = new_n;
   }
   return acc;

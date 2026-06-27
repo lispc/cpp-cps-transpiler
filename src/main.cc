@@ -77,7 +77,7 @@ public:
     Visitor.TraverseDecl(Context.getTranslationUnitDecl());
 
     llvm::outs() << "\n// ================================\n";
-    llvm::outs() << "// Generated CPS + Trampoline code\n";
+    llvm::outs() << "// Generated iterative code\n";
     llvm::outs() << "// ================================\n\n";
     for (const auto &code : Visitor.getGenerated()) {
       llvm::outs() << code << "\n\n";
@@ -103,7 +103,7 @@ static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 int main(int argc, const char **argv) {
   auto ExpectedParser = CommonOptionsParser::create(
       argc, argv, TranspilerCategory, cl::Optional,
-      "CPS Transpiler: convert recursive C++ functions to iterative CPS style\n");
+      "cps-transpiler: convert recursive C++ functions to iterative code\n");
   if (!ExpectedParser) {
     llvm::errs() << ExpectedParser.takeError();
     return 1;

@@ -1,6 +1,7 @@
+[Detected recursive function] clamp_down
 
 // ================================
-// Generated CPS + Trampoline code
+// Generated iterative code
 // ================================
 
 // === Generated tail-recursion optimized code for function: clamp_down ===

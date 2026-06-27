@@ -134,6 +134,253 @@ int main() {
             "neg_fact(6) = 1",
         ],
     },
+    {
+        "name": "gcd",
+        "input": "tests/test_input_gcd.cc",
+        "main": """
+#include <iostream>
+int main() {
+  std::cout << "gcd(48, 18) = " << gcd(48, 18) << std::endl;
+  std::cout << "gcd(100, 35) = " << gcd(100, 35) << std::endl;
+  std::cout << "gcd(7, 5) = " << gcd(7, 5) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "gcd(48, 18) = 6",
+            "gcd(100, 35) = 5",
+            "gcd(7, 5) = 1",
+        ],
+    },
+    {
+        "name": "multi_cps",
+        "input": "tests/test_input_multi_cps.cc",
+        "main": """
+#include <iostream>
+int main() {
+  std::cout << "multi_cps(5, 10) = " << multi_cps(5, 10) << std::endl;
+  std::cout << "multi_cps(6, 10) = " << multi_cps(6, 10) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "multi_cps(5, 10) = 130",
+            "multi_cps(6, 10) = 210",
+        ],
+    },
+    {
+        "name": "ptr",
+        "input": "tests/test_input_ptr.cc",
+        "main": """
+#include <iostream>
+int main() {
+  int arr[] = {1, 2, 3, 4, 5};
+  std::cout << "sum_ptr(arr, 5) = " << sum_ptr(arr, 5) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "sum_ptr(arr, 5) = 15",
+        ],
+    },
+    {
+        "name": "ref_cps",
+        "input": "tests/test_input_ref_cps.cc",
+        "main": """
+#include <iostream>
+int main() {
+  int x = 5;
+  std::cout << "ref_sum(x=5, 3) = " << ref_sum(x, 3) << std::endl;
+  std::cout << "ref_sum(x=5, 5) = " << ref_sum(x, 5) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "ref_sum(x=5, 3) = 15",
+            "ref_sum(x=5, 5) = 25",
+        ],
+    },
+    {
+        "name": "ref_tro",
+        "input": "tests/test_input_ref.cc",
+        "main": """
+#include <iostream>
+int main() {
+  int y = 5;
+  std::cout << "ref_accumulate(y=5, 3) = " << ref_accumulate(y, 3) << std::endl;
+  std::cout << "y after = " << y << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "ref_accumulate(y=5, 3) = 8",
+            "y after = 8",
+        ],
+    },
+    {
+        "name": "weird",
+        "input": "tests/test_input_weird.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "weird(" << i << ") = " << weird(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "weird(0) = 0",
+            "weird(1) = 1",
+            "weird(2) = 1",
+            "weird(3) = 3",
+            "weird(4) = 5",
+            "weird(5) = 11",
+            "weird(6) = 21",
+            "weird(7) = 43",
+            "weird(8) = 85",
+        ],
+    },
+    {
+        "name": "if_else",
+        "input": "tests/test_input_if_else.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 6; ++i) {
+    std::cout << "if_else(" << i << ") = " << if_else(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "if_else(0) = 1",
+            "if_else(1) = 1",
+            "if_else(2) = 2",
+            "if_else(3) = 4",
+            "if_else(4) = 8",
+            "if_else(5) = 16",
+            "if_else(6) = 32",
+        ],
+    },
+    {
+        "name": "multi_base",
+        "input": "tests/test_input_multi_base.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "multi_base(" << i << ") = " << multi_base(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "multi_base(0) = 0",
+            "multi_base(1) = 1",
+            "multi_base(2) = 1",
+            "multi_base(3) = 2",
+            "multi_base(4) = 3",
+            "multi_base(5) = 5",
+            "multi_base(6) = 8",
+            "multi_base(7) = 13",
+            "multi_base(8) = 21",
+        ],
+    },
+    {
+        "name": "with_local",
+        "input": "tests/test_input_with_local.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "with_local(" << i << ") = " << with_local(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "with_local(0) = 1",
+            "with_local(1) = 1",
+            "with_local(2) = 2",
+            "with_local(3) = 6",
+            "with_local(4) = 24",
+            "with_local(5) = 120",
+            "with_local(6) = 720",
+            "with_local(7) = 5040",
+            "with_local(8) = 40320",
+        ],
+    },
+    {
+        "name": "xor_acc",
+        "input": "tests/test_input_xor_acc.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "xor_acc(" << i << ") = " << xor_acc(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "xor_acc(0) = 0",
+            "xor_acc(1) = 1",
+            "xor_acc(2) = 3",
+            "xor_acc(3) = 0",
+            "xor_acc(4) = 4",
+            "xor_acc(5) = 1",
+            "xor_acc(6) = 7",
+            "xor_acc(7) = 0",
+            "xor_acc(8) = 8",
+        ],
+    },
+    {
+        "name": "xor_tree",
+        "input": "tests/test_input_xor_tree.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "xor_tree(" << i << ") = " << xor_tree(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "xor_tree(0) = 0",
+            "xor_tree(1) = 1",
+            "xor_tree(2) = 1",
+            "xor_tree(3) = 0",
+            "xor_tree(4) = 1",
+            "xor_tree(5) = 1",
+            "xor_tree(6) = 0",
+            "xor_tree(7) = 1",
+            "xor_tree(8) = 1",
+        ],
+    },
+    {
+        "name": "minmax",
+        "input": "tests/test_input_minmax.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 6; ++i) {
+    std::cout << "min_tree(" << i << ") = " << min_tree(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "min_tree(0) = 10",
+            "min_tree(1) = 1",
+            "min_tree(2) = 1",
+            "min_tree(3) = 1",
+            "min_tree(4) = 1",
+            "min_tree(5) = 1",
+            "min_tree(6) = 1",
+        ],
+    },
 ]
 
 

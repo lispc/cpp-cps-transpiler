@@ -6,7 +6,7 @@
 
 namespace cps {
 
-// Generate CPS + Trampoline code for a recursive function.
+// Generate iterative code for a recursive function.
 // Returns the complete generated C++ code block as a string.
 std::string GenerateCPS(const clang::FunctionDecl *FD);
 
