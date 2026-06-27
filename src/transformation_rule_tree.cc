@@ -265,7 +265,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
         if (IsLoopStmt(S))
           break;
         if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-          std::string txt = PrintStmt(IfS, Ctx.ASTCtx);
+          std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
           if (!txt.empty()) {
             txt = EnsureSemicolon(txt);
             w.raw(Indent(txt, w.current_indent()) + "\n");
