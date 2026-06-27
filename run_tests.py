@@ -1049,6 +1049,38 @@ int main() {
         ],
     },
     {
+        "name": "collect_recursive_calls_original",
+        "input": "tests/test_input_collect_recursive_calls.cc",
+        "preamble": "#include <string>\n#include <vector>\n\nstruct FunctionDecl {\n  std::string Name;\n  FunctionDecl(const std::string &N) : Name(N) {}\n  std::string getNameAsString() const { return Name; }\n};\n\nstruct StmtRange;\n\nstruct Stmt {\n  virtual ~Stmt() = default;\n  virtual StmtRange children() const;\n};\n\nstruct StmtRange {\n  static constexpr int Max = 16;\n  Stmt *Items[Max];\n  int Size;\n  StmtRange() : Size(0) {}\n  void push_back(Stmt *S) { Items[Size++] = S; }\n\n  Stmt **begin() { return Items; }\n  Stmt **end() { return Items + Size; }\n  Stmt *const *begin() const { return Items; }\n  Stmt *const *end() const { return Items + Size; }\n\n  struct RevIt {\n    Stmt **P;\n    Stmt *&operator*() { return *(P - 1); }\n    RevIt &operator++() { --P; return *this; }\n    bool operator!=(const RevIt &O) const { return P != O.P; }\n  };\n  struct ConstRevIt {\n    Stmt *const *P;\n    Stmt *const &operator*() { return *(P - 1); }\n    ConstRevIt &operator++() { --P; return *this; }\n    bool operator!=(const ConstRevIt &O) const { return P != O.P; }\n  };\n  RevIt rbegin() { return RevIt{Items + Size}; }\n  RevIt rend() { return RevIt{Items}; }\n  ConstRevIt rbegin() const { return ConstRevIt{Items + Size}; }\n  ConstRevIt rend() const { return ConstRevIt{Items}; }\n};\n\nStmtRange Stmt::children() const { return StmtRange(); }\n\nstruct Expr : Stmt {};\n\nstruct CallExpr : Stmt {\n  FunctionDecl *Callee;\n  StmtRange Args;\n  CallExpr(FunctionDecl *C) : Callee(C) {}\n  void addArg(Stmt *A) { Args.push_back(A); }\n  const FunctionDecl *getDirectCallee() const { return Callee; }\n  StmtRange children() const override {\n    StmtRange R;\n    for (Stmt *S : Args)\n      R.push_back(S);\n    return R;\n  }\n};\n\ntemplate <typename T, typename U>\nconst T *dyn_cast(const U *P) {\n  return dynamic_cast<const T *>(P);\n}\n",
+        "main": """
+#include <iostream>
+int main() {
+  FunctionDecl target(\"target\"), other(\"other\");
+  Expr leaf;
+  CallExpr target1(&target); target1.addArg(&leaf);
+  CallExpr target2(&target); target2.addArg(&leaf);
+  CallExpr root(&other); root.addArg(&leaf); root.addArg(&target1); root.addArg(&target2);
+  CallExpr otherOnly(&other); otherOnly.addArg(&leaf);
+  std::vector<CallExpr *> calls1, calls2, calls3, calls4;
+  CollectRecursiveCallsInStmt(&root, \"target\", calls1);
+  CollectRecursiveCallsInStmt(&target1, \"target\", calls2);
+  CollectRecursiveCallsInStmt(&otherOnly, \"target\", calls3);
+  CollectRecursiveCallsInStmt(nullptr, \"target\", calls4);
+  std::cout << \"root_calls = \" << calls1.size() << std::endl;
+  std::cout << \"target_calls = \" << calls2.size() << std::endl;
+  std::cout << \"other_calls = \" << calls3.size() << std::endl;
+  std::cout << \"null_calls = \" << calls4.size() << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "root_calls = 2",
+            "target_calls = 1",
+            "other_calls = 0",
+            "null_calls = 0",
+        ],
+    },
+    {
         "name": "tree_holes",
         "input": "tests/test_input_tree_holes.cc",
         "preamble": "struct TreeNode;\n\nstruct NodeList {\n  TreeNode *data[10];\n  int size;\n  NodeList() : size(0) {}\n  void push_back(TreeNode *x) { data[size++] = x; }\n  TreeNode **begin() { return data; }\n  TreeNode **end() { return data + size; }\n\n  struct RevIt {\n    TreeNode **p;\n    TreeNode *&operator*() { return *(p - 1); }\n    RevIt &operator++() { --p; return *this; }\n    bool operator!=(const RevIt &o) const { return p != o.p; }\n  };\n  RevIt rbegin() { return RevIt{data + size}; }\n  RevIt rend() { return RevIt{data}; }\n\n  struct CRevIt {\n    TreeNode *const *p;\n    TreeNode *const &operator*() { return *(p - 1); }\n    CRevIt &operator++() { --p; return *this; }\n    bool operator!=(const CRevIt &o) const { return p != o.p; }\n  };\n  CRevIt rbegin() const { return CRevIt{data + size}; }\n  CRevIt rend() const { return CRevIt{data}; }\n};\n\nstruct IntList {\n  int data[100];\n  int size;\n  IntList() : size(0) {}\n  void push_back(int x) { data[size++] = x; }\n  int operator[](int i) const { return data[i]; }\n  int get_size() const { return size; }\n};\n\nstruct TreeNode {\n  int value;\n  NodeList children;\n};\n",
