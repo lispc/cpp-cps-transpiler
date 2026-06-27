@@ -50,7 +50,8 @@ bool BinaryStackRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   if (!BO)
     return false;
   std::string op = BO->getOpcodeStr().str();
-  if (op != "+" && op != "*" && op != "|" && op != "^")
+  if (op != "+" && op != "*" && op != "|" && op != "^" && op != "&&" &&
+      op != "||")
     return false;
 
   const Expr *LHS = BO->getLHS()->IgnoreParenImpCasts();
@@ -84,9 +85,15 @@ std::string BinaryStackRule::apply(const FunctionDecl *FD,
   } else if (op == "|") {
     identity = "0";
     combine = "result |= ";
-  } else { // ^
+  } else if (op == "^") {
     identity = "0";
     combine = "result ^= ";
+  } else if (op == "&&") {
+    identity = "true";
+    combine = "result &= ";
+  } else { // ||
+    identity = "false";
+    combine = "result |= ";
   }
 
   CodeEmitter e;
