@@ -46,6 +46,51 @@ python3 run_tests.py
 
 ---
 
+## Showcase：二项式系数 `C(n, k)`
+
+输入：经典的多参数双边递归
+
+```cpp
+int binomial(int n, int k) {
+  if (k == 0 || k == n) return 1;
+  return binomial(n - 1, k - 1) + binomial(n - 1, k);
+}
+```
+
+自动输出：可读的多参数显式栈迭代版本
+
+```cpp
+#include <vector>
+
+struct binomialFrame {
+  int n;
+  int k;
+  binomialFrame(int n, int k) : n(n), k(k) {}
+};
+
+int binomial(int n, int k) {
+  std::vector<binomialFrame> stack;
+  stack.emplace_back(n, k);
+  int result = 0;
+  while (!stack.empty()) {
+    auto cur = stack.back();
+    stack.pop_back();
+    if (cur.k == 0 || cur.k == cur.n) {
+      result += 1;
+    }
+    else {
+      stack.emplace_back(cur.n - 1, cur.k);
+      stack.emplace_back(cur.n - 1, cur.k - 1);
+    }
+  }
+  return result;
+}
+```
+
+完整文件见 [`tests/test_input_showcase.cc`](tests/test_input_showcase.cc) 与 [`tests/example_output_showcase.cc`](tests/example_output_showcase.cc)。
+
+---
+
 ## 支持的转换规则
 
 转换器内部维护一条**有序规则链**。对同一个递归函数，按下面的顺序匹配，第一个适用的规则获胜。
