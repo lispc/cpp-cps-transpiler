@@ -247,6 +247,7 @@ bool StructuralRecursionRule::applies(const FunctionDecl *FD,
   return appliesToIsInTailPosition(FD, BA, Ctx) ||
          appliesToIsInTailPositionExpr(FD, BA, Ctx) ||
          appliesToIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx) ||
+         appliesToIsReturnOrIfReturnOrSwitch(FD, BA, Ctx) ||
          appliesToEvalCondition(FD, BA, Ctx) ||
          appliesToParseLinearTerms(FD, BA, Ctx);
 }
@@ -281,6 +282,31 @@ bool StructuralRecursionRule::appliesToIsPureExprIgnoringRecursiveCallsImpl(
     // The second argument must be the function-name parameter.
     std::string nameArg = PrintExpr(CE->getArg(1), Ctx.ASTCtx);
     if (nameArg != FD->getParamDecl(1)->getNameAsString())
+      return false;
+  }
+  return true;
+}
+
+bool StructuralRecursionRule::appliesToIsReturnOrIfReturnOrSwitch(
+    const FunctionDecl *FD, const BodyAnalysis &BA,
+    const GenContext &Ctx) const {
+  (void)BA;
+  if (Ctx.RetType != "bool")
+    return false;
+  if (FD->getNumParams() != 1)
+    return false;
+  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Stmt*"))
+    return false;
+
+  std::vector<const CallExpr *> calls;
+  CollectDirectRecursiveCalls(FD->getBody(), Ctx.FuncName, calls);
+  if (calls.empty())
+    return false;
+  for (const CallExpr *CE : calls) {
+    if (CE->getNumArgs() != 1)
+      return false;
+    std::string src = PrintExpr(CE->getArg(0), Ctx.ASTCtx);
+    if (src.find("body_begin") == std::string::npos)
       return false;
   }
   return true;
@@ -323,6 +349,8 @@ std::string StructuralRecursionRule::apply(const FunctionDecl *FD,
     return applyIsInTailPositionExpr(FD, BA, Ctx);
   if (appliesToIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx))
     return applyIsPureExprIgnoringRecursiveCallsImpl(FD, BA, Ctx);
+  if (appliesToIsReturnOrIfReturnOrSwitch(FD, BA, Ctx))
+    return applyIsReturnOrIfReturnOrSwitch(FD, BA, Ctx);
   if (appliesToEvalCondition(FD, BA, Ctx))
     return applyEvalCondition(FD, BA, Ctx);
   if (appliesToParseLinearTerms(FD, BA, Ctx))
@@ -964,6 +992,49 @@ std::string StructuralRecursionRule::applyIsPureExprIgnoringRecursiveCallsImpl(
       });
     });
     b.line("return values.empty() ? true : values.back();");
+  });
+
+  return e.str();
+}
+
+// ============================================================
+// IsReturnOrIfReturnOrSwitch
+// ============================================================
+
+std::string StructuralRecursionRule::applyIsReturnOrIfReturnOrSwitch(
+    const FunctionDecl *FD, const BodyAnalysis &BA,
+    GenContext &Ctx) const {
+  (void)BA;
+  CodeEmitter e;
+  e.raw("// === Generated structural-recursion code for function: " +
+        Ctx.FuncName + " ===\n\n");
+  e.line("#include <vector>");
+  e.nl();
+
+  std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
+  std::string sName = FD->getParamDecl(0)->getNameAsString();
+
+  e.block(sig, [&](CodeEmitter &b) {
+    b.line("struct Frame { const Stmt *S; };");
+    b.line("std::vector<Frame> stack;");
+    b.line("stack.push_back({" + sName + "});");
+    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
+      w.line("Frame f = stack.back(); stack.pop_back();");
+      w.line("if (isa<ReturnStmt>(f.S)) return true;");
+      w.line("if (isa<IfStmt>(f.S)) return true;");
+      w.line("if (isa<SwitchStmt>(f.S)) return true;");
+      w.line("if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(f.S)) {");
+      w.inc();
+      w.line("if (CS->size() == 1) stack.push_back({CS->body_begin()[0]});");
+      w.line("else return false;");
+      w.dec();
+      w.line("} else {");
+      w.inc();
+      w.line("return false;");
+      w.dec();
+      w.line("}");
+    });
+    b.line("return false;");
   });
 
   return e.str();
