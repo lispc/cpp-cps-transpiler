@@ -813,6 +813,38 @@ int main() {
             "tree_search(nullptr, 1) = 0",
         ],
     },
+    {
+        "name": "tree_holes",
+        "input": "tests/test_input_tree_holes.cc",
+        "preamble": "struct TreeNode;\n\nstruct NodeList {\n  TreeNode *data[10];\n  int size;\n  NodeList() : size(0) {}\n  void push_back(TreeNode *x) { data[size++] = x; }\n  TreeNode **begin() { return data; }\n  TreeNode **end() { return data + size; }\n\n  struct RevIt {\n    TreeNode **p;\n    TreeNode *&operator*() { return *(p - 1); }\n    RevIt &operator++() { --p; return *this; }\n    bool operator!=(const RevIt &o) const { return p != o.p; }\n  };\n  RevIt rbegin() { return RevIt{data + size}; }\n  RevIt rend() { return RevIt{data}; }\n\n  struct CRevIt {\n    TreeNode *const *p;\n    TreeNode *const &operator*() { return *(p - 1); }\n    CRevIt &operator++() { --p; return *this; }\n    bool operator!=(const CRevIt &o) const { return p != o.p; }\n  };\n  CRevIt rbegin() const { return CRevIt{data + size}; }\n  CRevIt rend() const { return CRevIt{data}; }\n};\n\nstruct IntList {\n  int data[100];\n  int size;\n  IntList() : size(0) {}\n  void push_back(int x) { data[size++] = x; }\n  int operator[](int i) const { return data[i]; }\n  int get_size() const { return size; }\n};\n\nstruct TreeNode {\n  int value;\n  NodeList children;\n};\n",
+        "main": """
+#include <iostream>
+int main() {
+  TreeNode n4{4, {}};
+  TreeNode n5{5, {}};
+  TreeNode n2{2, {}};
+  n2.children.push_back(&n4);
+  n2.children.push_back(&n5);
+  TreeNode n3{3, {}};
+  TreeNode root{1, {}};
+  root.children.push_back(&n2);
+  root.children.push_back(&n3);
+  IntList holes;
+  collect_holes(&root, holes);
+  for (int i = 0; i < holes.get_size(); ++i) {
+    std::cout << "hole[" << i << "] = " << holes[i] << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "hole[0] = 1",
+            "hole[1] = 2",
+            "hole[2] = 4",
+            "hole[3] = 5",
+            "hole[4] = 3",
+        ],
+    },
 ]
 
 

@@ -56,7 +56,8 @@ bool IsTreeTraversalShape(const clang::CompoundStmt *CS,
                           const std::string &FuncName,
                           const clang::Stmt *&OutLoop,
                           const clang::IfStmt *&OutRecIf,
-                          clang::CallExpr *&OutRecCall);
+                          clang::CallExpr *&OutRecCall,
+                          bool IsVoid = false);
 
 // Purity analysis.
 bool IsKnownPureFunction(const std::string &Name);

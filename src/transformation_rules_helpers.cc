@@ -248,7 +248,7 @@ const Stmt *GetLoopBody(const Stmt *S) {
 
 bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
                           const Stmt *&OutLoop, const IfStmt *&OutRecIf,
-                          CallExpr *&OutRecCall) {
+                          CallExpr *&OutRecCall, bool IsVoid) {
   OutLoop = nullptr;
   OutRecIf = nullptr;
   OutRecCall = nullptr;
@@ -268,6 +268,7 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
 
   // Everything before the loop must be recursion-free.
   bool beforeLoop = true;
+  bool seenReturnAfterLoop = false;
   for (const Stmt *S : CS->body()) {
     if (S == OutLoop) {
       beforeLoop = false;
@@ -279,9 +280,15 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
       if (!callsInStmt.empty())
         return false;
     } else {
-      // After the loop we only allow the final return.
-      if (!isa<ReturnStmt>(S))
+      // After the loop we allow at most one final return. For void functions
+      // the body may simply fall through.
+      if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
+        if (seenReturnAfterLoop)
+          return false;
+        seenReturnAfterLoop = true;
+      } else {
         return false;
+      }
     }
   }
 
@@ -289,16 +296,19 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
   if (!LoopBody)
     return false;
 
-  // Exactly one recursive call inside the loop, used as if-return condition.
+  // Exactly one recursive call inside the loop.
   std::vector<CallExpr *> calls;
   CollectRecursiveCallsInStmt(LoopBody, FuncName, calls);
   if (calls.size() != 1)
     return false;
 
+  // Case 1: recursive call is the condition of an if-return.
   OutRecIf = FindRecursiveCallReturnIf(LoopBody, FuncName, OutRecCall);
-  if (!OutRecIf || !OutRecCall)
-    return false;
+  if (OutRecIf && OutRecCall)
+    return true;
 
+  // Case 2: recursive call appears as an expression statement.
+  OutRecCall = calls[0];
   return true;
 }
 

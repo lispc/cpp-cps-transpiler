@@ -27,6 +27,16 @@ std::string GetSourceText(const Stmt *S, const ASTContext *Ctx) {
       .str();
 }
 
+std::string GetSourceText(const Decl *D, const ASTContext *Ctx) {
+  if (!D)
+    return "";
+  SourceRange Range = D->getSourceRange();
+  const SourceManager &SM = Ctx->getSourceManager();
+  const LangOptions &LO = Ctx->getLangOpts();
+  return Lexer::getSourceText(CharSourceRange::getTokenRange(Range), SM, LO)
+      .str();
+}
+
 // Ensure a statement source fragment ends with a semicolon.
 std::string EnsureSemicolon(const std::string &S) {
   std::string result = S;
@@ -36,6 +46,55 @@ std::string EnsureSemicolon(const std::string &S) {
       result.back() != '{')
     result += ';';
   return result;
+}
+
+// Detect parameters used as output references (non-const lvalue references).
+bool IsOutputReferenceParam(const ParmVarDecl *PVD) {
+  QualType T = PVD->getType();
+  if (T->isLValueReferenceType()) {
+    QualType Pointee = T->getPointeeType();
+    if (!Pointee.isConstQualified())
+      return true;
+  }
+  return false;
+}
+
+bool ContainsCall(const Stmt *Root, const CallExpr *Target) {
+  if (!Root)
+    return false;
+  if (Root == Target)
+    return true;
+  for (const Stmt *Child : Root->children()) {
+    if (ContainsCall(Child, Target))
+      return true;
+  }
+  return false;
+}
+
+const Stmt *FindDirectChildStmtContainingCall(const Stmt *Root,
+                                              const CallExpr *Target) {
+  if (!Root)
+    return nullptr;
+  for (const Stmt *Child : Root->children()) {
+    if (!Child)
+      continue;
+    if (Child == Target || ContainsCall(Child, Target))
+      return Child;
+  }
+  return nullptr;
+}
+
+// Strip a trailing ':' (and surrounding whitespace) from a range-based for
+// loop variable source fragment.
+std::string StripTrailingColon(const std::string &S) {
+  std::string r = S;
+  while (!r.empty() && std::isspace(static_cast<unsigned char>(r.back())))
+    r.pop_back();
+  if (!r.empty() && r.back() == ':')
+    r.pop_back();
+  while (!r.empty() && std::isspace(static_cast<unsigned char>(r.back())))
+    r.pop_back();
+  return r;
 }
 
 // Strip a common leading whitespace prefix from every line in S.
@@ -90,7 +149,8 @@ bool TreeTraversalRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   const Stmt *Loop = nullptr;
   const IfStmt *RecIf = nullptr;
   CallExpr *RecCall = nullptr;
-  return IsTreeTraversalShape(CS, Ctx.FuncName, Loop, RecIf, RecCall);
+  bool IsVoid = FD->getReturnType()->isVoidType();
+  return IsTreeTraversalShape(CS, Ctx.FuncName, Loop, RecIf, RecCall, IsVoid);
 }
 
 std::string TreeTraversalRule::apply(const FunctionDecl *FD,
@@ -98,22 +158,35 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
                                      GenContext &Ctx) const {
   (void)BA;
   const CompoundStmt *CS = dyn_cast<CompoundStmt>(FD->getBody());
+  bool IsVoid = FD->getReturnType()->isVoidType();
 
-  // Locate the loop and its recursive-call IfStmt.
+  // Locate the loop and its recursive call.
   const Stmt *LoopStmt = nullptr;
-  for (const Stmt *S : CS->body()) {
-    if (IsLoopStmt(S)) {
-      LoopStmt = S;
-      break;
-    }
-  }
+  const IfStmt *RecIf = nullptr;
+  CallExpr *RecCall = nullptr;
+  if (!IsTreeTraversalShape(CS, Ctx.FuncName, LoopStmt, RecIf, RecCall, IsVoid))
+    return "";
+
   const Stmt *LoopBody = GetLoopBody(LoopStmt);
 
-  CallExpr *RecCall = nullptr;
-  const IfStmt *RecIf =
-      FindRecursiveCallReturnIf(LoopBody, Ctx.FuncName, RecCall);
+  // Identify output-reference parameters (e.g., non-const lvalue references
+  // used as out-arguments). They are not stored in frames.
+  std::vector<bool> IsOutRef(FD->getNumParams(), false);
+  for (unsigned i = 0; i < FD->getNumParams(); ++i)
+    IsOutRef[i] = IsOutputReferenceParam(FD->getParamDecl(i));
 
-  // Build frame struct.
+  auto buildFrameCtorArgs = [&](CallExpr *CE) {
+    std::string s;
+    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      if (IsOutRef[i])
+        continue;
+      if (!s.empty())
+        s += ", ";
+      s += PrintExpr(CE->getArg(i), Ctx.ASTCtx);
+    }
+    return s;
+  };
+
   std::string frameName = Ctx.FuncName + "Frame";
 
   CodeEmitter e;
@@ -125,24 +198,26 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
   e.block("struct " + frameName, [&](CodeEmitter &b) {
-    for (unsigned i = 0; i < FD->getNumParams(); ++i)
+    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      if (IsOutRef[i])
+        continue;
       b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
              FD->getParamDecl(i)->getNameAsString() + ";");
-    std::string ctor = frameName + "(";
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (i > 0)
-        ctor += ", ";
-      ctor += GetParamStorageType(FD->getParamDecl(i)) + " " +
-              FD->getParamDecl(i)->getNameAsString() + "_";
     }
-    ctor += ")";
+    std::string ctor = frameName + "(";
     std::string init;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      if (IsOutRef[i])
+        continue;
       std::string p = FD->getParamDecl(i)->getNameAsString();
-      if (!init.empty())
+      if (!init.empty()) {
+        ctor += ", ";
         init += ", ";
+      }
+      ctor += GetParamStorageType(FD->getParamDecl(i)) + " " + p + "_";
       init += p + "(" + p + "_)";
     }
+    ctor += ")";
     if (!init.empty())
       ctor += " : " + init;
     ctor += " {}";
@@ -163,10 +238,14 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
     // Initialize stack with the original arguments.
     b.line("std::vector<" + frameName + "> stack;");
     std::string push0 = "stack.emplace_back(" + frameName + "(";
+    bool firstPush = true;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (i > 0)
+      if (IsOutRef[i])
+        continue;
+      if (!firstPush)
         push0 += ", ";
       push0 += FD->getParamDecl(i)->getNameAsString();
+      firstPush = false;
     }
     push0 += "));";
     b.line(push0);
@@ -174,9 +253,12 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
     b.block("while (!stack.empty())", [&](CodeEmitter &w) {
       w.line("auto cur = stack.back();");
       w.line("stack.pop_back();");
-      for (unsigned i = 0; i < FD->getNumParams(); ++i)
+      for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+        if (IsOutRef[i])
+          continue;
         w.line("auto " + FD->getParamDecl(i)->getNameAsString() + " = cur." +
                FD->getParamDecl(i)->getNameAsString() + ";");
+      }
 
       // Emit base cases (all IfStmts before the loop).
       for (const Stmt *S : CS->body()) {
@@ -191,29 +273,50 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
         }
       }
 
-      // Emit the loop, replacing the recursive-call IfStmt with a push.
-      std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-      std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
-
-      std::string pushStr = "stack.emplace_back(" + frameName + "(";
-      for (unsigned i = 0; i < RecCall->getNumArgs(); ++i) {
-        if (i > 0)
-          pushStr += ", ";
-        pushStr += PrintExpr(RecCall->getArg(i), Ctx.ASTCtx);
+      // Emit the loop. For range-based for loops we rewrite to reverse
+      // iteration so that children are processed in original DFS order on the
+      // explicit stack.
+      std::string pushStr = "stack.emplace_back(" + frameName + "(" +
+                            buildFrameCtorArgs(RecCall) + "));";
+      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+      if (ForRange) {
+        std::string rangeSrc =
+            GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+        std::string loopVarSrc =
+            StripTrailingColon(GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+        w.block("", [&](CodeEmitter &rb) {
+          rb.line("auto &&__cps_range = " + rangeSrc + ";");
+          rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
+                   "__cps_range.rend(); ++__cps_it)",
+                   [&](CodeEmitter &fb) {
+                     fb.line(loopVarSrc + " = *__cps_it;");
+                     fb.line(pushStr);
+                   });
+        });
+      } else {
+        std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
+        std::string toReplace;
+        if (RecIf) {
+          toReplace = GetSourceText(RecIf, Ctx.ASTCtx);
+        } else {
+          const Stmt *Encl =
+              FindDirectChildStmtContainingCall(LoopBody, RecCall);
+          toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                           : GetSourceText(RecCall, Ctx.ASTCtx);
+        }
+        if (!toReplace.empty()) {
+          size_t pos = loopSrc.find(toReplace);
+          if (pos != std::string::npos) {
+            loopSrc.replace(pos, toReplace.size(), pushStr);
+            // getSourceText may leave the original trailing ';' outside the
+            // replaced range, causing double semicolons.
+            size_t p2 = loopSrc.find(";;", pos);
+            if (p2 != std::string::npos)
+              loopSrc.replace(p2, 2, ";");
+          }
+        }
+        w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent()) + "\n");
       }
-      pushStr += "));";
-
-      size_t pos = loopSrc.find(recIfSrc);
-      if (pos != std::string::npos) {
-        loopSrc.replace(pos, recIfSrc.size(), pushStr);
-        // getSourceText may leave the original trailing ';' outside the
-        // replaced range, causing double semicolons.
-        size_t p2 = loopSrc.find(";;", pos);
-        if (p2 != std::string::npos)
-          loopSrc.replace(p2, 2, ";");
-      }
-
-      w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent()) + "\n");
     });
 
     // Emit final return.
@@ -226,7 +329,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
         break;
       }
     }
-    if (FinalRet) {
+    if (FinalRet && !IsVoid) {
       std::string txt = PrintStmt(FinalRet, Ctx.ASTCtx);
       if (!txt.empty()) {
         txt = EnsureSemicolon(txt);
