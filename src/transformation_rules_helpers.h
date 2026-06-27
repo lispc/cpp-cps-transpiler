@@ -37,6 +37,26 @@ void CollectHoles(const clang::Expr *E, const std::string &FuncName,
                   std::vector<clang::CallExpr *> &Holes);
 void CollectHolesDeep(const clang::Expr *E, const std::string &FuncName,
                       std::vector<clang::CallExpr *> &Holes);
+void CollectRecursiveCallsInStmt(const clang::Stmt *S,
+                                 const std::string &FuncName,
+                                 std::vector<clang::CallExpr *> &Calls);
+const clang::IfStmt *FindRecursiveCallReturnIf(const clang::Stmt *S,
+                                               const std::string &FuncName,
+                                               clang::CallExpr *&OutCall);
+
+// Loop helpers.
+bool IsLoopStmt(const clang::Stmt *S);
+const clang::Stmt *GetLoopBody(const clang::Stmt *S);
+
+// Tree-traversal shape detection.
+// Matches functions whose body consists of (optional) leading/base-case
+// if-return statements, a single for-loop that contains exactly one direct
+// recursive call used as the condition of an if-return, and a final return.
+bool IsTreeTraversalShape(const clang::CompoundStmt *CS,
+                          const std::string &FuncName,
+                          const clang::Stmt *&OutLoop,
+                          const clang::IfStmt *&OutRecIf,
+                          clang::CallExpr *&OutRecCall);
 
 // Purity analysis.
 bool IsKnownPureFunction(const std::string &Name);

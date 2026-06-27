@@ -15,7 +15,7 @@ using namespace clang;
 
 bool GenericStackRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                                const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   std::vector<CallExpr *> holes;
   CollectHoles(BA.RecExpr, Ctx.FuncName, holes);

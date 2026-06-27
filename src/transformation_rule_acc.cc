@@ -14,7 +14,7 @@ using namespace clang;
 
 bool AccumulatorRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                               const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   // All base-case return values must be identical and parameter-free, so
   // they can serve as the accumulator identity.

@@ -16,7 +16,7 @@ using namespace clang;
 
 bool TuplingRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                           const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   if (Ctx.ParamNames.empty())
     return false;

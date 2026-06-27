@@ -171,7 +171,8 @@ int f(int n) {
 | 4 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
 | 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接 | 显式帧栈 | `fib(n-1)+fib(n-2)` |
 | 6 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
-| 7 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
+| 7 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归 | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
+| 8 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
 
 规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule / MemoizationRule 不会输给 BinaryStackRule / GenericStackRule，AccumulatorRule 不会输给 GenericStackRule。
 
@@ -571,6 +572,7 @@ cps/
     ├── transformation_rule_memo.cc
     ├── transformation_rule_binary.cc
     ├── transformation_rule_generic.cc
+    ├── transformation_rule_tree.cc    # TreeTraversalRule（树遍历递归）
     └── transformation_rule_defun.cc
 ```
 

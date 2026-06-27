@@ -758,6 +758,61 @@ int main() {
             "sum_loop(8) = 85",
         ],
     },
+    {
+        "name": "dogfood",
+        "input": "tests/test_input_dogfood.cc",
+        "preamble": "struct Node {\n  int tag;\n  Node *left;\n  Node *right;\n};\n",
+        "main": """
+#include <iostream>
+int main() {
+  Node n4{4, nullptr, nullptr};
+  Node n5{5, nullptr, nullptr};
+  Node n6{6, nullptr, nullptr};
+  Node n7{7, nullptr, nullptr};
+  Node n2{2, &n4, &n5};
+  Node n3{3, &n6, &n7};
+  Node root{1, &n2, &n3};
+  std::cout << "contains_target(root, 5) = " << contains_target(&root, 5) << std::endl;
+  std::cout << "contains_target(root, 8) = " << contains_target(&root, 8) << std::endl;
+  std::cout << "contains_target(nullptr, 1) = " << contains_target(nullptr, 1) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "contains_target(root, 5) = 1",
+            "contains_target(root, 8) = 0",
+            "contains_target(nullptr, 1) = 0",
+        ],
+    },
+    {
+        "name": "tree_search",
+        "input": "tests/test_input_tree_search.cc",
+        "preamble": "struct Node {\n  int tag;\n  Node *children[2];\n  int num_children;\n};\n",
+        "main": """
+#include <iostream>
+int main() {
+  Node n4{4, {nullptr, nullptr}, 0};
+  Node n5{5, {nullptr, nullptr}, 0};
+  Node n6{6, {nullptr, nullptr}, 0};
+  Node n7{7, {nullptr, nullptr}, 0};
+  Node *c2[] = {&n4, &n5};
+  Node *c3[] = {&n6, &n7};
+  Node n2{2, {c2[0], c2[1]}, 2};
+  Node n3{3, {c3[0], c3[1]}, 2};
+  Node *croot[] = {&n2, &n3};
+  Node root{1, {croot[0], croot[1]}, 2};
+  std::cout << "tree_search(root, 5) = " << tree_search(&root, 5) << std::endl;
+  std::cout << "tree_search(root, 8) = " << tree_search(&root, 8) << std::endl;
+  std::cout << "tree_search(nullptr, 1) = " << tree_search(nullptr, 1) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "tree_search(root, 5) = 1",
+            "tree_search(root, 8) = 0",
+            "tree_search(nullptr, 1) = 0",
+        ],
+    },
 ]
 
 

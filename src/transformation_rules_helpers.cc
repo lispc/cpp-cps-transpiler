@@ -5,6 +5,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/StmtCXX.h"
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -191,6 +192,114 @@ bool ContainsRecursiveCall(const Expr *E, const std::string &FuncName) {
     }
   }
   return false;
+}
+
+void CollectRecursiveCallsInStmt(const Stmt *S, const std::string &FuncName,
+                                 std::vector<CallExpr *> &Calls) {
+  if (!S)
+    return;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
+    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+      if (Callee->getNameAsString() == FuncName)
+        Calls.push_back(const_cast<CallExpr *>(CE));
+    }
+  }
+  for (const Stmt *Child : S->children())
+    CollectRecursiveCallsInStmt(Child, FuncName, Calls);
+}
+
+const IfStmt *FindRecursiveCallReturnIf(const Stmt *S,
+                                        const std::string &FuncName,
+                                        CallExpr *&OutCall) {
+  if (!S)
+    return nullptr;
+  if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+    const Expr *Cond = IfS->getCond()->IgnoreParenImpCasts();
+    if (const CallExpr *CE = dyn_cast<CallExpr>(Cond)) {
+      if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+        if (Callee->getNameAsString() == FuncName) {
+          if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(IfS->getThen())) {
+            (void)RS;
+            OutCall = const_cast<CallExpr *>(CE);
+            return IfS;
+          }
+        }
+      }
+    }
+  }
+  for (const Stmt *Child : S->children()) {
+    if (const IfStmt *Found = FindRecursiveCallReturnIf(Child, FuncName, OutCall))
+      return Found;
+  }
+  return nullptr;
+}
+
+bool IsLoopStmt(const Stmt *S) {
+  return isa<ForStmt>(S) || isa<CXXForRangeStmt>(S);
+}
+
+const Stmt *GetLoopBody(const Stmt *S) {
+  if (const ForStmt *FS = dyn_cast<ForStmt>(S))
+    return FS->getBody();
+  if (const CXXForRangeStmt *FRS = dyn_cast<CXXForRangeStmt>(S))
+    return FRS->getBody();
+  return nullptr;
+}
+
+bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
+                          const Stmt *&OutLoop, const IfStmt *&OutRecIf,
+                          CallExpr *&OutRecCall) {
+  OutLoop = nullptr;
+  OutRecIf = nullptr;
+  OutRecCall = nullptr;
+  if (!CS || CS->body_empty())
+    return false;
+
+  // Find the single loop in the body.
+  for (const Stmt *S : CS->body()) {
+    if (IsLoopStmt(S)) {
+      if (OutLoop)
+        return false; // more than one loop
+      OutLoop = S;
+    }
+  }
+  if (!OutLoop)
+    return false;
+
+  // Everything before the loop must be recursion-free.
+  bool beforeLoop = true;
+  for (const Stmt *S : CS->body()) {
+    if (S == OutLoop) {
+      beforeLoop = false;
+      continue;
+    }
+    if (beforeLoop) {
+      std::vector<CallExpr *> callsInStmt;
+      CollectRecursiveCallsInStmt(S, FuncName, callsInStmt);
+      if (!callsInStmt.empty())
+        return false;
+    } else {
+      // After the loop we only allow the final return.
+      if (!isa<ReturnStmt>(S))
+        return false;
+    }
+  }
+
+  const Stmt *LoopBody = GetLoopBody(OutLoop);
+  if (!LoopBody)
+    return false;
+
+  // Exactly one recursive call inside the loop, used as if-return condition.
+  std::vector<CallExpr *> calls;
+  CollectRecursiveCallsInStmt(LoopBody, FuncName, calls);
+  if (calls.size() != 1)
+    return false;
+
+  OutRecIf = FindRecursiveCallReturnIf(LoopBody, FuncName, OutRecCall);
+  if (!OutRecIf || !OutRecCall)
+    return false;
+
+  return true;
 }
 
 // ============================================================

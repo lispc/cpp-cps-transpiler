@@ -25,7 +25,7 @@ struct DefunClosureInfo {
 bool DefunctionalizedRule::applies(const FunctionDecl *FD,
                                    const BodyAnalysis &BA,
                                    const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   return BA.IsRecursive;
 }

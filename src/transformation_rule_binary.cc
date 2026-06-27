@@ -43,7 +43,7 @@ bool ExtractTwoRecursiveCalls(const Expr *LHS, const Expr *RHS,
 
 bool BinaryStackRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                               const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   const Expr *E = BA.RecExpr->IgnoreParenImpCasts();
   const BinaryOperator *BO = dyn_cast<BinaryOperator>(E);

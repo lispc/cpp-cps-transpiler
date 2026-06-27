@@ -73,6 +73,9 @@ public:
 
   std::string str() const { return os_.str(); }
 
+  // Current indent level (each level is two spaces in line()).
+  int current_indent() const { return indent_; }
+
 private:
   std::ostringstream os_;
   int indent_ = 0;

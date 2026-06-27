@@ -16,7 +16,7 @@ using namespace clang;
 
 bool MemoizationRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                               const GenContext &Ctx) const {
-  if (Ctx.RetType == "void")
+  if (Ctx.RetType == "void" || !BA.RecExpr)
     return false;
   // Single-parameter functions only for now.
   if (Ctx.ParamNames.size() != 1)

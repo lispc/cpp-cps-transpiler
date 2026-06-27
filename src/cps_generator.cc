@@ -435,6 +435,17 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA,
   if (!CS)
     return false;
 
+  // Tree-traversal recursion: loop over children with a recursive call inside
+  // an if-return. Existing return-expression rules don't handle this shape;
+  // TreeTraversalRule will pick it up via BA.IsRecursive.
+  const Stmt *Loop = nullptr;
+  const IfStmt *RecIf = nullptr;
+  CallExpr *RecCall = nullptr;
+  if (IsTreeTraversalShape(CS, FuncName, Loop, RecIf, RecCall)) {
+    BA.IsRecursive = true;
+    return true;
+  }
+
   size_t idx = 0;
   while (idx < CS->size()) {
     const Stmt *S = CS->body_begin()[idx];
