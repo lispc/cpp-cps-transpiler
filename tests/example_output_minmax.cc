@@ -17,7 +17,8 @@ struct min_treeFrame {
 
 struct min_treeCombineMarker {
   int count;
-  min_treeCombineMarker(int c) : count(c) {}
+  min_treeFrame frame;
+  min_treeCombineMarker(int c, min_treeFrame f) : count(c), frame(std::move(f)) {}
 };
 
 int min_tree(int n) {
@@ -28,6 +29,9 @@ int min_tree(int n) {
     auto entry = stack.back();
     stack.pop_back();
     if (std::holds_alternative<min_treeCombineMarker>(entry)) {
+      auto marker = std::get<min_treeCombineMarker>(entry);
+      auto cur = marker.frame;
+      auto n = cur.n;
       int v0 = values.back();
       values.pop_back();
       int v1 = values.back();
@@ -42,7 +46,7 @@ int min_tree(int n) {
       else if (n == 1)
         values.push_back(1);
       else {
-        stack.emplace_back(min_treeCombineMarker(2));
+        stack.emplace_back(min_treeCombineMarker(2, cur));
         stack.emplace_back(min_treeFrame(n - 1));
         stack.emplace_back(min_treeFrame(n - 2));
       }

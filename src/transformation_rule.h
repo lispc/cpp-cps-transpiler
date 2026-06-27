@@ -17,12 +17,23 @@ class CodeEmitter;
 // Body analysis
 // ============================================================
 
+struct BaseCase {
+  // Original AST expressions. May be null for synthetic base cases (e.g.,
+  // derived from a switch statement).
+  const clang::Expr *CondExpr = nullptr;
+  const clang::Expr *ValueExpr = nullptr;
+
+  // String representations, always valid for generation.
+  std::string CondStr;
+  std::string ValueStr;
+};
+
 struct BodyAnalysis {
   // Statements that appear before any base case.
   std::vector<const clang::Stmt *> LeadingStmts;
 
-  // Base cases: each is (condition, return-value). They are checked in order.
-  std::vector<std::pair<const clang::Expr *, const clang::Expr *>> BaseCases;
+  // Base cases, checked in order.
+  std::vector<BaseCase> BaseCases;
 
   // Statements that appear after the last base case but before the recursive
   // return. These are re-evaluated each iteration after base-case checks.
@@ -76,12 +87,21 @@ std::string PrintStmt(const clang::Stmt *S, const clang::ASTContext *Ctx);
 void CollectHoles(const clang::Expr *E, const std::string &FuncName,
                   std::vector<clang::CallExpr *> &Holes);
 
+// Gather direct recursive calls inside E in post-order, including those nested
+// in the arguments of another recursive call.
+void CollectHolesDeep(const clang::Expr *E, const std::string &FuncName,
+                      std::vector<clang::CallExpr *> &Holes);
+
 // Returns true if E contains a direct recursive call.
 bool ContainsRecursiveCall(const clang::Expr *E, const std::string &FuncName);
 
 // Check whether an expression references any function parameters.
 bool ExprUsesParams(const clang::Expr *E,
                     const std::unordered_set<std::string> &ParamNames);
+
+// Conservatively check whether an expression is side-effect free.
+// Known-pure calls like min/max/std::min/std::max are whitelisted.
+bool IsPureExpr(const clang::Expr *E);
 
 // Does this expression (with given holes replaced) or any remaining hole
 // arguments reference parameters?
@@ -145,6 +165,10 @@ public:
   virtual std::string apply(const clang::FunctionDecl *FD,
                             const BodyAnalysis &BA,
                             GenContext &Ctx) const = 0;
+
+  // Estimated runtime cost of the generated code. Lower is better.
+  // Used by the rule engine to pick the best applicable rule.
+  virtual int cost() const = 0;
 
   virtual const char *name() const = 0;
 };

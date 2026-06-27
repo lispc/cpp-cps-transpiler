@@ -429,6 +429,143 @@ int main() {
             "C(20, 10) = 184756",
         ],
     },
+    {
+        "name": "switch_fib",
+        "input": "tests/test_input_switch.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 10; ++i) {
+    std::cout << "fib_switch(" << i << ") = " << fib_switch(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "fib_switch(0) = 0",
+            "fib_switch(1) = 1",
+            "fib_switch(2) = 1",
+            "fib_switch(3) = 2",
+            "fib_switch(4) = 3",
+            "fib_switch(5) = 5",
+            "fib_switch(6) = 8",
+            "fib_switch(7) = 13",
+            "fib_switch(8) = 21",
+            "fib_switch(9) = 34",
+            "fib_switch(10) = 55",
+        ],
+    },
+    {
+        "name": "switch_fact",
+        "input": "tests/test_input_switch3.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "fact_switch(" << i << ") = " << fact_switch(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "fact_switch(0) = 1",
+            "fact_switch(1) = 1",
+            "fact_switch(2) = 2",
+            "fact_switch(3) = 6",
+            "fact_switch(4) = 24",
+            "fact_switch(5) = 120",
+            "fact_switch(6) = 720",
+            "fact_switch(7) = 5040",
+            "fact_switch(8) = 40320",
+        ],
+    },
+    {
+        "name": "impure_base",
+        "input": "tests/test_input_impure_base.cc",
+        "preamble": "int counter = 0;\n",
+        "main": """
+#include <iostream>
+int main() {
+  std::cout << "impure_base(5) = " << impure_base(5) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "impure_base(5) = 15",
+        ],
+    },
+    {
+        "name": "nested",
+        "input": "tests/test_input_nested.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 4; ++i) {
+    std::cout << "nested_fact(" << i << ") = " << nested_fact(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "nested_fact(0) = 1",
+            "nested_fact(1) = 1",
+            "nested_fact(2) = 1",
+            "nested_fact(3) = 1",
+            "nested_fact(4) = 1",
+        ],
+    },
+    {
+        "name": "mutual",
+        "input": "tests/test_input_mutual.cc",
+        "main": """
+#include <iostream>
+int main() {
+  for (int i = 0; i <= 6; ++i) {
+    std::cout << "odd(" << i << ") = " << odd(i) << ", even(" << i << ") = " << even(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "odd(0) = 0, even(0) = 1",
+            "odd(1) = 1, even(1) = 0",
+            "odd(2) = 0, even(2) = 1",
+            "odd(3) = 1, even(3) = 0",
+            "odd(4) = 0, even(4) = 1",
+            "odd(5) = 1, even(5) = 0",
+            "odd(6) = 0, even(6) = 1",
+        ],
+    },
+    {
+        "name": "showcase2",
+        "input": "tests/test_input_showcase2.cc",
+        "main": """
+#include <iostream>
+int main() {
+  std::cout << "mc91(50) = " << mc91(50) << std::endl;
+  std::cout << "mc91(101) = " << mc91(101) << std::endl;
+  std::cout << "mc91(110) = " << mc91(110) << std::endl;
+  for (int i = 0; i <= 8; ++i) {
+    std::cout << "mod0(" << i << ") = " << mod0(i) << ", mod1(" << i << ") = " << mod1(i) << ", mod2(" << i << ") = " << mod2(i) << std::endl;
+  }
+  return 0;
+}
+""",
+        "expected": [
+            "mc91(50) = 91",
+            "mc91(101) = 91",
+            "mc91(110) = 100",
+            "mod0(0) = 1, mod1(0) = 0, mod2(0) = 0",
+            "mod0(1) = 0, mod1(1) = 1, mod2(1) = 0",
+            "mod0(2) = 0, mod1(2) = 0, mod2(2) = 1",
+            "mod0(3) = 1, mod1(3) = 0, mod2(3) = 0",
+            "mod0(4) = 0, mod1(4) = 1, mod2(4) = 0",
+            "mod0(5) = 0, mod1(5) = 0, mod2(5) = 1",
+            "mod0(6) = 1, mod1(6) = 0, mod2(6) = 0",
+            "mod0(7) = 0, mod1(7) = 1, mod2(7) = 0",
+            "mod0(8) = 0, mod1(8) = 0, mod2(8) = 1",
+        ],
+    },
 ]
 
 

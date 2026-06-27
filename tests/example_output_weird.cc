@@ -16,7 +16,8 @@ struct weirdFrame {
 
 struct weirdCombineMarker {
   int count;
-  weirdCombineMarker(int c) : count(c) {}
+  weirdFrame frame;
+  weirdCombineMarker(int c, weirdFrame f) : count(c), frame(std::move(f)) {}
 };
 
 int weird(int n) {
@@ -27,6 +28,9 @@ int weird(int n) {
     auto entry = stack.back();
     stack.pop_back();
     if (std::holds_alternative<weirdCombineMarker>(entry)) {
+      auto marker = std::get<weirdCombineMarker>(entry);
+      auto cur = marker.frame;
+      auto n = cur.n;
       int v0 = values.back();
       values.pop_back();
       int v1 = values.back();
@@ -39,7 +43,7 @@ int weird(int n) {
       if (n <= 1)
         values.push_back(n);
       else {
-        stack.emplace_back(weirdCombineMarker(2));
+        stack.emplace_back(weirdCombineMarker(2, cur));
         stack.emplace_back(weirdFrame(n - 1));
         stack.emplace_back(weirdFrame(n - 2));
       }

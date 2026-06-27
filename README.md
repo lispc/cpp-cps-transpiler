@@ -91,6 +91,40 @@ int binomial(int n, int k) {
 
 ---
 
+## Showcase 2：嵌套递归 McCarthy 91 + 三路相互递归 mod3
+
+输入：嵌套递归与多路相互递归
+
+```cpp
+// McCarthy 91：著名嵌套递归
+int mc91(int n) {
+  if (n > 100) return n - 10;
+  return mc91(mc91(n + 11));
+}
+
+// mod3 系统：三路相互递归
+int mod0(int n) {
+  if (n == 0) return 1;
+  return mod2(n - 1);
+}
+int mod1(int n) {
+  if (n == 0) return 0;
+  return mod0(n - 1);
+}
+int mod2(int n) {
+  if (n == 0) return 0;
+  return mod1(n - 1);
+}
+```
+
+输出特点：
+- `mc91` 被转换为 defunctionalized continuation 形式，用 `std::vector<mc91Frame>` 模拟嵌套调用
+- `mod0/mod1/mod2` 被识别为同一个相互递归组，生成共享的 `enum mod0MutualTag` + dispatcher
+
+完整文件见 [`tests/test_input_showcase2.cc`](tests/test_input_showcase2.cc)。
+
+---
+
 ## 支持的转换规则
 
 转换器内部维护一条**有序规则链**。对同一个递归函数，按下面的顺序匹配，第一个适用的规则获胜。
@@ -104,7 +138,7 @@ int binomial(int n, int k) {
 | 5 | **GenericStackRule** | 任意直接递归表达式 | `std::variant` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
 | 6 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
 
-规则顺序很重要：TuplingRule 必须在 BinaryStackRule 之前，否则 `fib` 会被展开成 O(2^n) 的显式栈版本；AccumulatorRule 必须在 GenericStackRule 之前，否则 `fact` 也会走通用栈。
+规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule 不会输给 BinaryStackRule，AccumulatorRule 不会输给 GenericStackRule。
 
 ---
 
@@ -454,19 +488,22 @@ cps/
 
 - 单参数 / 多参数函数，返回基本类型（如 `int`）
 - 参数类型为值、指针、引用
-- 函数体形式：`[leading] (if-return)* [middle] return recursive-expr;`
+- 函数体形式：`[leading] (if-return | switch-return)* [middle] return recursive-expr;`
 - 递归调用可嵌套在**任意表达式**中：二元/一元运算符、函数调用、条件表达式、数组下标等
 - 双边递归、单边递归、纯尾递归
-- 多个 base case（if-else-if 链），包括 accumulator 规则下的多 base case
+- 多个 base case（if-else-if 链或 switch case），包括 accumulator 规则下的多 base case
 - 常见可结合运算的 accumulator 转换：`+`、`*`、`|`、`^`、`min`、`max`
 - k 阶线性递推的 tupling 转换
+- 嵌套递归（递归调用的参数仍是递归调用）
+- 相互递归（尾调用形式、相同签名的函数组）
+- 副作用纯度分析：含副作用的表达式自动降级到保持求值顺序的显式栈规则
 
 ### 🚧 限制
 
-- 只支持**直接递归**（函数体内直接调用自身），不支持相互递归
-- 递归调用不能嵌套在另一递归调用的参数中，例如 `fact(fact(n-1))`
+- 只支持**直接递归**与**相互递归**；不支持函数指针、虚函数等动态分发递归
 - TuplingRule 目前仅支持系数为 `±1` 的线性递推
-- 更复杂的控制流（`switch`、循环、异常）不支持
+- 相互递归要求函数签名相同且为尾调用形式
+- 更复杂的控制流（循环、异常、goto）不支持
 - 生成的代码风格偏向机械翻译，可读性仍有提升空间
 
 ---

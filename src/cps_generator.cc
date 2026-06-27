@@ -132,6 +132,28 @@ void CollectHoles(const Expr *E, const std::string &FuncName,
   }
 }
 
+void CollectHolesDeep(const Expr *E, const std::string &FuncName,
+                      std::vector<CallExpr *> &Holes) {
+  if (!E)
+    return;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+      if (Callee->getNameAsString() == FuncName) {
+        // Post-order: descend into arguments first, then record this call.
+        for (unsigned i = 0; i < CE->getNumArgs(); ++i)
+          CollectHolesDeep(CE->getArg(i), FuncName, Holes);
+        Holes.push_back(const_cast<CallExpr *>(CE));
+        return;
+      }
+    }
+  }
+  for (const Stmt *Child : E->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
+      CollectHolesDeep(ChildExpr, FuncName, Holes);
+    }
+  }
+}
+
 bool ContainsRecursiveCall(const Expr *E, const std::string &FuncName) {
   if (!E)
     return false;
@@ -170,6 +192,66 @@ bool ExprUsesParams(const Expr *E,
   }
   return false;
 }
+
+namespace {
+
+bool IsKnownPureFunction(const std::string &Name) {
+  return Name == "min" || Name == "max" || Name == "std::min" ||
+         Name == "std::max";
+}
+
+bool IsPureExprImpl(const Expr *E) {
+  if (!E)
+    return true;
+
+  E = E->IgnoreParenImpCasts();
+
+  // Calls: conservative, except whitelisted pure functions.
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+    std::string name;
+    if (const FunctionDecl *Callee = CE->getDirectCallee())
+      name = Callee->getNameAsString();
+    if (IsKnownPureFunction(name)) {
+      for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+        if (!IsPureExprImpl(CE->getArg(i)))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // Assignments and compound assignments are side effects.
+  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->isAssignmentOp())
+      return false;
+    return IsPureExprImpl(BO->getLHS()) && IsPureExprImpl(BO->getRHS());
+  }
+
+  // Increment/decrement and address-of are side effects.
+  if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
+    if (UO->isIncrementDecrementOp())
+      return false;
+    return IsPureExprImpl(UO->getSubExpr());
+  }
+
+  // Comma operator evaluates both and discards left: left may have side effects.
+  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->getOpcode() == BO_Comma)
+      return false;
+  }
+
+  // Everything else is pure if its children are pure.
+  for (const Stmt *Child : E->children()) {
+    if (!IsPureExprImpl(dyn_cast_or_null<Expr>(Child)))
+      return false;
+  }
+  return true;
+}
+
+} // anonymous namespace
+
+bool IsPureExpr(const Expr *E) { return IsPureExprImpl(E); }
 
 bool NeedsSavedArg(
     const Expr *E, const std::vector<CallExpr *> &Holes,
@@ -337,15 +419,25 @@ const Expr *ExtractReturnExpr(const Stmt *S) {
   return nullptr;
 }
 
-void FlattenIfElse(const Stmt *S, BodyAnalysis &BA) {
+BaseCase MakeBaseCase(const Expr *Cond, const Expr *Value,
+                      const ASTContext *Ctx) {
+  BaseCase bc;
+  bc.CondExpr = Cond;
+  bc.ValueExpr = Value;
+  bc.CondStr = PrintExpr(Cond, Ctx);
+  bc.ValueStr = PrintExpr(Value, Ctx);
+  return bc;
+}
+
+void FlattenIfElse(const Stmt *S, BodyAnalysis &BA, const ASTContext *Ctx) {
   if (!S)
     return;
   if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
     const Expr *BaseExpr = ExtractReturnExpr(IfS->getThen());
     if (BaseExpr)
-      BA.BaseCases.emplace_back(IfS->getCond(), BaseExpr);
+      BA.BaseCases.push_back(MakeBaseCase(IfS->getCond(), BaseExpr, Ctx));
     if (const Stmt *Else = IfS->getElse())
-      FlattenIfElse(Else, BA);
+      FlattenIfElse(Else, BA, Ctx);
     return;
   }
   if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
@@ -354,21 +446,117 @@ void FlattenIfElse(const Stmt *S, BodyAnalysis &BA) {
   }
 }
 
-bool IsReturnOrIfReturn(const Stmt *S) {
+namespace {
+
+bool IsInTailPosition(const Expr *E, const Stmt *S,
+                      const std::string &FuncName) {
+  if (!E || !S)
+    return false;
+  if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S))
+    return RS->getRetValue() == E;
+  if (const IfStmt *IfS = dyn_cast<IfStmt>(S))
+    return IsInTailPosition(E, IfS->getThen(), FuncName) ||
+           IsInTailPosition(E, IfS->getElse(), FuncName);
+  if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
+    if (CS->body_empty())
+      return false;
+    const Stmt *Last = nullptr;
+    for (const Stmt *Child : CS->body())
+      Last = Child;
+    return IsInTailPosition(E, Last, FuncName);
+  }
+  return false;
+}
+
+// Collect all case values from a possibly nested chain of CaseStmts
+// (e.g., "case 0: case 1: return ...").
+std::vector<const Expr *> CollectCaseValues(const CaseStmt *Case) {
+  std::vector<const Expr *> values;
+  const Stmt *Sub = Case;
+  while (const CaseStmt *CS = dyn_cast<CaseStmt>(Sub)) {
+    values.push_back(CS->getLHS());
+    if (CS->getRHS())
+      values.push_back(CS->getRHS());
+    Sub = CS->getSubStmt();
+  }
+  return values;
+}
+
+// Get the actual body after stripping nested CaseStmts.
+const Stmt *GetCaseBody(const CaseStmt *Case) {
+  const Stmt *Sub = Case;
+  while (const CaseStmt *CS = dyn_cast<CaseStmt>(Sub))
+    Sub = CS->getSubStmt();
+  return Sub;
+}
+
+} // anonymous namespace
+
+bool ExtractSwitchCases(const SwitchStmt *SS, BodyAnalysis &BA,
+                        const ASTContext *Ctx) {
+  if (!SS)
+    return false;
+  const Expr *Cond = SS->getCond();
+  if (!Cond)
+    return false;
+  std::string condStr = PrintExpr(Cond, Ctx);
+
+  const CompoundStmt *CS = dyn_cast<CompoundStmt>(SS->getBody());
+  if (!CS)
+    return false;
+
+  const Expr *pendingValue = nullptr;
+  std::string pendingValueStr;
+  std::vector<const Expr *> pendingCases;
+
+  for (const Stmt *Sub : CS->body()) {
+    if (const CaseStmt *Case = dyn_cast<CaseStmt>(Sub)) {
+      std::vector<const Expr *> caseVals = CollectCaseValues(Case);
+      const Expr *ret = ExtractReturnExpr(GetCaseBody(Case));
+      for (const Expr *cv : caseVals)
+        pendingCases.push_back(cv);
+      if (ret) {
+        pendingValue = ret;
+        pendingValueStr = PrintExpr(ret, Ctx);
+      }
+      if (pendingValue) {
+        for (const Expr *cv : pendingCases) {
+          BaseCase bc;
+          bc.ValueExpr = pendingValue;
+          bc.CondStr = "(" + condStr + " == " + PrintExpr(cv, Ctx) + ")";
+          bc.ValueStr = pendingValueStr;
+          BA.BaseCases.push_back(bc);
+        }
+        pendingCases.clear();
+      }
+    } else if (const DefaultStmt *Def = dyn_cast<DefaultStmt>(Sub)) {
+      const Expr *ret = ExtractReturnExpr(Def->getSubStmt());
+      if (!ret)
+        return false;
+      BA.RecExpr = ret;
+      BA.IsRecursive = true;
+    }
+  }
+  return BA.IsRecursive;
+}
+
+bool IsReturnOrIfReturnOrSwitch(const Stmt *S) {
   if (isa<ReturnStmt>(S))
     return true;
   if (isa<IfStmt>(S))
     return true;
+  if (isa<SwitchStmt>(S))
+    return true;
   if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(S)) {
     if (CS->size() == 1)
-      return IsReturnOrIfReturn(CS->body_begin()[0]);
+      return IsReturnOrIfReturnOrSwitch(CS->body_begin()[0]);
   }
   return false;
 }
 
 } // anonymous namespace
 
-bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA) {
+bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA, const ASTContext *Ctx) {
   BA = BodyAnalysis();
   const CompoundStmt *CS = dyn_cast<CompoundStmt>(Body);
   if (!CS)
@@ -377,7 +565,7 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA) {
   size_t idx = 0;
   while (idx < CS->size()) {
     const Stmt *S = CS->body_begin()[idx];
-    if (IsReturnOrIfReturn(S))
+    if (IsReturnOrIfReturnOrSwitch(S))
       break;
     BA.LeadingStmts.push_back(S);
     ++idx;
@@ -389,14 +577,20 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA) {
       const Expr *BaseExpr = ExtractReturnExpr(IfS->getThen());
       if (!BaseExpr)
         return false;
-      BA.BaseCases.emplace_back(IfS->getCond(), BaseExpr);
+      BA.BaseCases.push_back(MakeBaseCase(IfS->getCond(), BaseExpr, Ctx));
       if (const Stmt *Else = IfS->getElse()) {
-        FlattenIfElse(Else, BA);
+        FlattenIfElse(Else, BA, Ctx);
         ++idx;
         break;
       }
       ++idx;
       continue;
+    }
+    if (const SwitchStmt *SS = dyn_cast<SwitchStmt>(S)) {
+      if (!ExtractSwitchCases(SS, BA, Ctx))
+        return false;
+      ++idx;
+      break;
     }
     if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
       BA.RecExpr = RS->getRetValue();
@@ -435,20 +629,161 @@ std::string GenerateCPS(const FunctionDecl *FD) {
   }
 
   BodyAnalysis BA;
-  if (!AnalyzeBody(FD->getBody(), BA)) {
+  if (!AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx)) {
     errs() << "[cps-transpiler] Function body not in supported shape "
               "(expected: leading-stmts? (if-return)* return recursive;)\n";
     return "";
   }
 
   auto rules = CreateDefaultRules();
+  const TransformationRule *bestRule = nullptr;
   for (const auto &rule : rules) {
     if (rule->applies(FD, BA, Ctx)) {
-      return rule->apply(FD, BA, Ctx);
+      if (!bestRule || rule->cost() < bestRule->cost())
+        bestRule = rule.get();
     }
   }
 
+  if (bestRule)
+    return bestRule->apply(FD, BA, Ctx);
+
   return "";
+}
+
+// ============================================================
+// Mutual recursion support (basic tail-recursive groups)
+// ============================================================
+
+std::string GenerateMutualCPS(
+    const std::vector<const FunctionDecl *> &FDs) {
+  if (FDs.empty())
+    return "";
+
+  const ASTContext *Ctx = &FDs[0]->getASTContext();
+
+  // Require identical signatures (same return type and parameter types).
+  std::string retType = FDs[0]->getReturnType().getAsString();
+  std::vector<std::string> paramTypes;
+  std::vector<std::string> paramNames;
+  for (unsigned i = 0; i < FDs[0]->getNumParams(); ++i) {
+    paramTypes.push_back(FDs[0]->getParamDecl(i)->getType().getAsString());
+    paramNames.push_back(FDs[0]->getParamDecl(i)->getNameAsString());
+  }
+  for (size_t f = 1; f < FDs.size(); ++f) {
+    if (FDs[f]->getReturnType().getAsString() != retType)
+      return "";
+    if (FDs[f]->getNumParams() != paramTypes.size())
+      return "";
+    for (unsigned i = 0; i < FDs[f]->getNumParams(); ++i) {
+      if (FDs[f]->getParamDecl(i)->getType().getAsString() != paramTypes[i])
+        return "";
+      if (FDs[f]->getParamDecl(i)->getNameAsString() != paramNames[i])
+        return "";
+    }
+  }
+
+  // Analyze each function body.
+  std::unordered_map<std::string, BodyAnalysis> Analyses;
+  for (const FunctionDecl *FD : FDs) {
+    BodyAnalysis BA;
+    if (!AnalyzeBody(FD->getBody(), BA, Ctx))
+      return "";
+    Analyses[FD->getNameAsString()] = BA;
+  }
+
+  // Verify tail-recursive mutual calls.
+  for (const FunctionDecl *FD : FDs) {
+    const BodyAnalysis &BA = Analyses[FD->getNameAsString()];
+    const Expr *RecExpr = BA.RecExpr;
+    const CallExpr *CE = dyn_cast<CallExpr>(RecExpr);
+    if (!CE)
+      return "";
+    const FunctionDecl *Callee = CE->getDirectCallee();
+    if (!Callee)
+      return "";
+    // The recursive return must be a direct call to another group member.
+    bool found = false;
+    for (const FunctionDecl *Other : FDs) {
+      if (Other->getNameAsString() == Callee->getNameAsString()) {
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      return "";
+    if (!IsInTailPosition(CE, FD->getBody(), FD->getNameAsString()))
+      return "";
+  }
+
+  CodeEmitter e;
+  e.raw("// === Generated mutual-recursion code ===\n\n");
+
+  // Enum tag.
+  std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
+  e.raw("enum class " + enumName + " {\n");
+  for (const FunctionDecl *FD : FDs)
+    e.raw("  " + FD->getNameAsString() + ",\n");
+  e.raw("};\n\n");
+
+  // Dispatcher signature.
+  std::string sig = retType + " " + FDs[0]->getNameAsString() +
+                    "_dispatch(" + enumName + " tag";
+  for (size_t i = 0; i < paramNames.size(); ++i)
+    sig += ", " + paramTypes[i] + " " + paramNames[i];
+  sig += ")";
+
+  e.block(sig, [&](CodeEmitter &b) {
+    b.block("while (1)", [&](CodeEmitter &w) {
+      w.block("switch (tag)", [&](CodeEmitter &sw) {
+        for (const FunctionDecl *FD : FDs) {
+          const BodyAnalysis &BA = Analyses[FD->getNameAsString()];
+          sw.line("case " + enumName + "::" + FD->getNameAsString() + ": {");
+          sw.inc();
+          for (const auto &bc : BA.BaseCases) {
+            sw.line("if (" + bc.CondStr + ") return " + bc.ValueStr + ";");
+          }
+          const CallExpr *CE = dyn_cast<CallExpr>(BA.RecExpr);
+          std::string nextTag = CE->getDirectCallee()->getNameAsString();
+          sw.line("tag = " + enumName + "::" + nextTag + ";");
+          for (unsigned i = 0;
+               i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
+            sw.line("auto next_" + paramNames[i] + " = " +
+                    PrintExpr(CE->getArg(i), Ctx) + ";");
+          }
+          for (unsigned i = 0;
+               i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
+            sw.line(paramNames[i] + " = next_" + paramNames[i] + ";");
+          }
+          sw.line("break;");
+          sw.dec();
+          sw.line("}");
+        }
+      });
+    });
+  });
+  e.nl();
+
+  // Wrapper functions.
+  for (const FunctionDecl *FD : FDs) {
+    std::string wrapperSig = retType + " " + FD->getNameAsString() + "(";
+    for (size_t i = 0; i < paramNames.size(); ++i) {
+      if (i > 0) wrapperSig += ", ";
+      wrapperSig += paramTypes[i] + " " + paramNames[i];
+    }
+    wrapperSig += ")";
+    e.block(wrapperSig, [&](CodeEmitter &b) {
+      std::string call = "return " + FDs[0]->getNameAsString() +
+                         "_dispatch(" + enumName + "::" +
+                         FD->getNameAsString();
+      for (const auto &p : paramNames)
+        call += ", " + p;
+      call += ");";
+      b.line(call);
+    });
+    e.nl();
+  }
+
+  return e.str();
 }
 
 } // namespace cps

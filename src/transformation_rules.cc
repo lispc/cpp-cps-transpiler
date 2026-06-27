@@ -93,8 +93,8 @@ public:
       b.block("while (1)", [&](CodeEmitter &w) {
         EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
         for (const auto &bc : BA.BaseCases) {
-          w.line("if (" + PrintExpr(bc.first, Ctx.ASTCtx) + ") return " +
-                 PrintExpr(bc.second, Ctx.ASTCtx) + ";");
+          w.line("if (" + bc.CondStr + ") return " +
+                 bc.ValueStr + ";");
         }
         EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
         if (const CallExpr *RecCall = dyn_cast<CallExpr>(BA.RecExpr)) {
@@ -116,6 +116,8 @@ public:
     return e.str();
   }
 
+  int cost() const override { return 10; }
+
   const char *name() const override { return "TailRecursionRule"; }
 };
 
@@ -133,9 +135,10 @@ public:
       return false;
     std::string baseValue;
     for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
-      if (ExprUsesParams(BA.BaseCases[i].second, Ctx.ParamNameSet))
+      if (!BA.BaseCases[i].ValueExpr ||
+          ExprUsesParams(BA.BaseCases[i].ValueExpr, Ctx.ParamNameSet))
         return false;
-      std::string val = PrintExpr(BA.BaseCases[i].second, Ctx.ASTCtx);
+      std::string val = BA.BaseCases[i].ValueStr;
       if (i == 0)
         baseValue = val;
       else if (val != baseValue)
@@ -180,7 +183,15 @@ public:
 
     bool lhsRec = (LHS == holes[0]);
     bool rhsRec = (RHS == holes[0]);
-    return (lhsRec && !rhsRec) || (!lhsRec && rhsRec);
+    if (!((lhsRec && !rhsRec) || (!lhsRec && rhsRec)))
+      return false;
+
+    const Expr *Step = lhsRec ? RHS : LHS;
+    for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
+      if (!BA.BaseCases[i].ValueExpr || !IsPureExpr(BA.BaseCases[i].ValueExpr))
+        return false;
+    }
+    return IsPureExpr(Step);
   }
 
   std::string apply(const FunctionDecl *FD, const BodyAnalysis &BA,
@@ -240,13 +251,13 @@ public:
     for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
       if (i > 0)
         loopCond += " && ";
-      loopCond += "!(" + PrintExpr(BA.BaseCases[i].first, Ctx.ASTCtx) + ")";
+      loopCond += "!(" + BA.BaseCases[i].CondStr + ")";
     }
 
     std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
     e.block(sig, [&](CodeEmitter &b) {
       b.line(Ctx.RetType + " " + accName + " = " +
-             PrintExpr(BA.BaseCases[0].second, Ctx.ASTCtx) + ";");
+             BA.BaseCases[0].ValueStr + ";");
       b.block("while (" + loopCond + ")",
               [&](CodeEmitter &w) {
                 EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
@@ -277,6 +288,8 @@ public:
 
     return e.str();
   }
+
+  int cost() const override { return 20; }
 
   const char *name() const override { return "AccumulatorRule"; }
 };
@@ -454,6 +467,15 @@ public:
     if (Ctx.ParamNames.empty())
       return false;
 
+    // Switch-derived base cases have synthetic string conditions; tupling
+    // needs AST expressions to evaluate them for n=0..k-1.
+    for (const auto &bc : BA.BaseCases) {
+      if (!bc.CondExpr)
+        return false;
+      if (!bc.ValueExpr || !IsPureExpr(bc.ValueExpr))
+        return false;
+    }
+
     std::vector<LinearTerm> terms;
     int maxOrder = 0;
     if (!ParseLinearTerms(BA.RecExpr, Ctx.FuncName, Ctx.ParamNames[0], terms,
@@ -478,7 +500,7 @@ public:
     for (int j = 0; j < maxOrder; ++j) {
       bool covered = false;
       for (const auto &bc : BA.BaseCases) {
-        auto r = EvalConditionForParam(bc.first, Ctx.ParamNames[0], j);
+        auto r = EvalConditionForParam(bc.CondExpr, Ctx.ParamNames[0], j);
         if (r == EvalResult::True) {
           covered = true;
           break;
@@ -522,9 +544,8 @@ public:
               [&](CodeEmitter &iw) {
                 for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
                   std::string prefix = (bi == 0) ? "if (" : "else if (";
-                  iw.line(prefix + PrintExpr(BA.BaseCases[bi].first, Ctx.ASTCtx) +
-                          ") return " +
-                          PrintExpr(BA.BaseCases[bi].second, Ctx.ASTCtx) + ";");
+                  iw.line(prefix + BA.BaseCases[bi].CondStr + ") return " +
+                          BA.BaseCases[bi].ValueStr + ";");
                 }
                 iw.line("return 0;");
               });
@@ -533,12 +554,11 @@ public:
 
       for (int j = 0; j < k; ++j) {
         for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-          if (EvalConditionForParam(BA.BaseCases[bi].first, pName, j) ==
+          if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, j) ==
               EvalResult::True) {
             std::string baseExpr =
-                ReplaceParamWithLiteral(PrintExpr(BA.BaseCases[bi].second,
-                                                  Ctx.ASTCtx),
-                                        pName, std::to_string(j));
+                ReplaceParamWithLiteral(BA.BaseCases[bi].ValueStr, pName,
+                                        std::to_string(j));
             b.line("vals[" + std::to_string(j) + "] = " + baseExpr + ";");
             break;
           }
@@ -549,11 +569,9 @@ public:
                   pName + "; ++i)",
               [&](CodeEmitter &fw) {
                 fw.line(Ctx.RetType + " next = " + nextExpr + ";");
-                fw.line("for (int j = 0; j < " + std::to_string(k - 1) +
-                        "; ++j)");
-                fw.inc();
-                fw.line("vals[j] = vals[j + 1];");
-                fw.dec();
+                for (int j = 0; j < k - 1; ++j)
+                  fw.line("vals[" + std::to_string(j) + "] = vals[" +
+                          std::to_string(j + 1) + "];");
                 fw.line("vals[" + std::to_string(k - 1) + "] = next;");
               });
       b.line("return vals[" + std::to_string(k - 1) + "];");
@@ -561,6 +579,8 @@ public:
 
     return e.str();
   }
+
+  int cost() const override { return 30; }
 
   const char *name() const override { return "TuplingRule"; }
 };
@@ -674,12 +694,12 @@ public:
         for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
           std::string prefix = (bi == 0) ? "if (" : "else if (";
           const auto &bc = BA.BaseCases[bi];
-          w.line(prefix + ReplaceParamsWithCur(PrintExpr(bc.first, Ctx.ASTCtx),
+          w.line(prefix + ReplaceParamsWithCur(bc.CondStr,
                                                Ctx.ParamNames) +
                  ") {");
           w.inc();
           w.line(combine +
-                 ReplaceParamsWithCur(PrintExpr(bc.second, Ctx.ASTCtx),
+                 ReplaceParamsWithCur(bc.ValueStr,
                                       Ctx.ParamNames) +
                  ";");
           w.dec();
@@ -719,6 +739,8 @@ public:
     return e.str();
   }
 
+  int cost() const override { return 100; }
+
   const char *name() const override { return "BinaryStackRule"; }
 };
 
@@ -732,7 +754,17 @@ public:
                const GenContext &Ctx) const override {
     std::vector<CallExpr *> holes;
     CollectHoles(BA.RecExpr, Ctx.FuncName, holes);
-    return !holes.empty();
+    if (holes.empty())
+      return false;
+    // GenericStackRule cannot handle recursive calls inside a hole's arguments
+    // (nested recursion); leave those to DefunctionalizedRule.
+    for (CallExpr *CE : holes) {
+      for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+        if (ContainsRecursiveCall(CE->getArg(i), Ctx.FuncName))
+          return false;
+      }
+    }
+    return true;
   }
 
   std::string apply(const FunctionDecl *FD, const BodyAnalysis &BA,
@@ -780,7 +812,9 @@ public:
     std::string markerName = Ctx.FuncName + "CombineMarker";
     e.block("struct " + markerName, [&](CodeEmitter &b) {
       b.line("int count;");
-      b.line(markerName + "(int c) : count(c) {}");
+      b.line(frameName + " frame;");
+      b.line(markerName + "(int c, " + frameName + " f) : count(c), " +
+             "frame(std::move(f)) {}");
     }, ";");
     e.nl();
 
@@ -804,6 +838,10 @@ public:
         w.line("stack.pop_back();");
         w.block("if (std::holds_alternative<" + markerName + ">(entry))",
                 [&](CodeEmitter &iw) {
+          iw.line("auto marker = std::get<" + markerName + ">(entry);");
+          iw.line("auto cur = marker.frame;");
+          for (const auto &p : Ctx.ParamNames)
+            iw.line("auto " + p + " = cur." + p + ";");
           for (size_t i = 0; i < holes.size(); ++i) {
             iw.line(Ctx.RetType + " v" + std::to_string(i) +
                     " = values.back();");
@@ -819,9 +857,9 @@ public:
           for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
             std::string prefix = (bi == 0) ? "if (" : "else if (";
             const auto &bc = BA.BaseCases[bi];
-            iw.line(prefix + PrintExpr(bc.first, Ctx.ASTCtx) + ")");
+            iw.line(prefix + bc.CondStr + ")");
             iw.inc();
-            iw.line("values.push_back(" + PrintExpr(bc.second, Ctx.ASTCtx) +
+            iw.line("values.push_back(" + bc.ValueStr +
                     ");");
             iw.dec();
           }
@@ -829,7 +867,7 @@ public:
           iw.inc();
           EmitStmts(iw, BA.MiddleStmts, Ctx.ASTCtx);
           iw.line("stack.emplace_back(" + markerName + "(" +
-                  std::to_string(holes.size()) + "));");
+                  std::to_string(holes.size()) + ", cur));");
           for (size_t i = 0; i < holes.size(); ++i) {
             std::string push = "stack.emplace_back(" + frameName + "(";
             for (unsigned a = 0;
@@ -850,6 +888,8 @@ public:
 
     return e.str();
   }
+
+  int cost() const override { return 200; }
 
   const char *name() const override { return "GenericStackRule"; }
 };
@@ -928,7 +968,7 @@ public:
     e.nl();
 
     std::vector<CallExpr *> holes;
-    CollectHoles(RecExpr, Ctx.FuncName, holes);
+    CollectHolesDeep(RecExpr, Ctx.FuncName, holes);
 
     if (holes.size() == 1 && holes[0] == RecExpr->IgnoreParenImpCasts()) {
       e.block(sig, [&](CodeEmitter &b) {
@@ -944,8 +984,8 @@ public:
           EmitUnpacksDefun(w, "arg", Ctx);
           EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
           for (const auto &bc : BA.BaseCases) {
-            w.line("if (" + PrintExpr(bc.first, Ctx.ASTCtx) + ") return " +
-                   PrintExpr(bc.second, Ctx.ASTCtx) + ";");
+            w.line("if (" + bc.CondStr + ") return " +
+                   bc.ValueStr + ";");
           }
           EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
           if (const CallExpr *RecCall = dyn_cast<CallExpr>(RecExpr)) {
@@ -1036,10 +1076,15 @@ public:
         push += ");";
         casesEmitter.line(push);
 
+        std::unordered_map<const Expr *, std::string> argRepls;
+        for (size_t j = 0; j <= i; ++j)
+          argRepls[holes[j]] =
+              (j == i) ? "val" : "f.vals[" + std::to_string(j) + "]";
         std::vector<std::string> newParams;
         for (unsigned a = 0;
              a < FD->getNumParams() && a < holes[i + 1]->getNumArgs(); ++a)
-          newParams.push_back(PrintExpr(holes[i + 1]->getArg(a), Ctx.ASTCtx));
+          newParams.push_back(PrintExprWithReplacements(
+              holes[i + 1]->getArg(a), argRepls, Ctx.ASTCtx));
         casesEmitter.line("arg = " + ArgCtorDefun(newParams, Ctx) + ";");
         casesEmitter.line("goto dispatch;");
       }
@@ -1082,9 +1127,9 @@ public:
         for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
           std::string prefix = (bi == 0) ? "if (" : "else if (";
           const auto &bc = BA.BaseCases[bi];
-          w.block(prefix + PrintExpr(bc.first, Ctx.ASTCtx) + ")",
+          w.block(prefix + bc.CondStr + ")",
                   [&](CodeEmitter &iw) {
-                    iw.line("val = " + PrintExpr(bc.second, Ctx.ASTCtx) + ";");
+                    iw.line("val = " + bc.ValueStr + ";");
                   });
         }
         w.line("else {");
@@ -1109,6 +1154,8 @@ public:
 
     return e.str();
   }
+
+  int cost() const override { return 1000; }
 
   const char *name() const override { return "DefunctionalizedRule"; }
 };
