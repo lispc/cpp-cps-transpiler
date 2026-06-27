@@ -914,6 +914,29 @@ int main() {
         ],
     },
     {
+        "name": "contains_rec",
+        "input": "tests/test_input_contains_rec.cc",
+        "preamble": "struct Node;\n\nstruct NodePtrList {\n  Node *data[10];\n  int size;\n  NodePtrList() : size(0) {}\n  void push_back(Node *x) { data[size++] = x; }\n  Node **begin() { return data; }\n  Node **end() { return data + size; }\n\n  struct RevIt {\n    Node **p;\n    Node *&operator*() { return *(p - 1); }\n    RevIt &operator++() { --p; return *this; }\n    bool operator!=(const RevIt &o) const { return p != o.p; }\n  };\n  RevIt rbegin() { return RevIt{data + size}; }\n  RevIt rend() { return RevIt{data}; }\n\n  struct CRevIt {\n    Node *const *p;\n    Node *const &operator*() { return *(p - 1); }\n    CRevIt &operator++() { --p; return *this; }\n    bool operator!=(const CRevIt &o) const { return p != o.p; }\n  };\n  CRevIt rbegin() const { return CRevIt{data + size}; }\n  CRevIt rend() const { return CRevIt{data}; }\n};\n\nstruct Node {\n  int kind;\n  int func_id;\n  Node *child_arr[2];\n  int child_count;\n  NodePtrList children() const {\n    NodePtrList list;\n    for (int i = 0; i < child_count; ++i)\n      list.push_back(child_arr[i]);\n    return list;\n  }\n};\n",
+        "main": """
+#include <iostream>
+int main() {
+  Node n4{1, 7, {nullptr, nullptr}, 0};
+  Node n5{0, 9, {nullptr, nullptr}, 0};
+  Node n2{0, 0, {&n4, &n5}, 2};
+  Node n6{1, 7, {nullptr, nullptr}, 0};
+  Node n3{0, 0, {&n6, nullptr}, 1};
+  Node root{0, 0, {&n2, &n3}, 2};
+  std::cout << "contains_rec(root, 7) = " << contains_rec(&root, 7) << std::endl;
+  std::cout << "contains_rec(root, 8) = " << contains_rec(&root, 8) << std::endl;
+  return 0;
+}
+""",
+        "expected": [
+            "contains_rec(root, 7) = 1",
+            "contains_rec(root, 8) = 0",
+        ],
+    },
+    {
         "name": "tree_holes",
         "input": "tests/test_input_tree_holes.cc",
         "preamble": "struct TreeNode;\n\nstruct NodeList {\n  TreeNode *data[10];\n  int size;\n  NodeList() : size(0) {}\n  void push_back(TreeNode *x) { data[size++] = x; }\n  TreeNode **begin() { return data; }\n  TreeNode **end() { return data + size; }\n\n  struct RevIt {\n    TreeNode **p;\n    TreeNode *&operator*() { return *(p - 1); }\n    RevIt &operator++() { --p; return *this; }\n    bool operator!=(const RevIt &o) const { return p != o.p; }\n  };\n  RevIt rbegin() { return RevIt{data + size}; }\n  RevIt rend() { return RevIt{data}; }\n\n  struct CRevIt {\n    TreeNode *const *p;\n    TreeNode *const &operator*() { return *(p - 1); }\n    CRevIt &operator++() { --p; return *this; }\n    bool operator!=(const CRevIt &o) const { return p != o.p; }\n  };\n  CRevIt rbegin() const { return CRevIt{data + size}; }\n  CRevIt rend() const { return CRevIt{data}; }\n};\n\nstruct IntList {\n  int data[100];\n  int size;\n  IntList() : size(0) {}\n  void push_back(int x) { data[size++] = x; }\n  int operator[](int i) const { return data[i]; }\n  int get_size() const { return size; }\n};\n\nstruct TreeNode {\n  int value;\n  NodeList children;\n};\n",

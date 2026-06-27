@@ -308,7 +308,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
               // means "skip the rest of this frame", not "exit the function".
               if (IsVoid && !inPostLoop)
                 txt = ReplaceWholeWord(txt, "return", "continue");
-              target.raw(Indent(txt, target.current_indent()) + "\n");
+              target.raw(Indent(txt, target.current_indent() * 2) + "\n");
             }
           }
         }
@@ -320,7 +320,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
             std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
             if (!txt.empty()) {
               txt = EnsureSemicolon(txt);
-              dw.raw(Indent(txt, dw.current_indent()) + "\n");
+              dw.raw(Indent(txt, dw.current_indent() * 2) + "\n");
             }
           }
         });
@@ -383,7 +383,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
                 }
               }
             }
-            ew.raw(Indent(NormalizeIndentation(loopSrc), ew.current_indent()) +
+            ew.raw(Indent(NormalizeIndentation(loopSrc), ew.current_indent() * 2) +
                    "\n");
           }
         });
@@ -437,7 +437,7 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
               }
             }
           }
-          w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent()) +
+          w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent() * 2) +
                  "\n");
         }
       }
