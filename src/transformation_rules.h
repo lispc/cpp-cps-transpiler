@@ -11,7 +11,7 @@ class TailRecursionRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -21,7 +21,7 @@ class AccumulatorRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -31,7 +31,7 @@ class TuplingRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -41,7 +41,7 @@ class MemoizationRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -51,7 +51,7 @@ class BinaryStackRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -61,7 +61,7 @@ class GenericStackRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -71,7 +71,7 @@ class DefunctionalizedRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
@@ -84,61 +84,92 @@ class TreeTraversalRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
 };
 
 // Structural recursion: hand-crafted explicit-stack state machines for the
-// helper shapes IsInTailPosition, EvalConditionForParam, and ParseLinearTerms.
-class StructuralRecursionRule : public TransformationRule {
+// helper shapes IsInTailPosition, EvalConditionForParam, ParseLinearTerms, etc.
+class IsInTailPositionRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
+};
 
-private:
-  bool appliesToIsInTailPosition(const clang::FunctionDecl *FD,
-                                 const BodyAnalysis &BA,
-                                 const GenContext &Ctx) const;
-  bool appliesToIsInTailPositionExpr(const clang::FunctionDecl *FD,
-                                     const BodyAnalysis &BA,
-                                     const GenContext &Ctx) const;
-  bool appliesToIsPureExprIgnoringRecursiveCallsImpl(
-      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
-      const GenContext &Ctx) const;
-  bool appliesToIsReturnOrIfReturnOrSwitch(
-      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
-      const GenContext &Ctx) const;
-  bool appliesToEvalCondition(const clang::FunctionDecl *FD,
-                              const BodyAnalysis &BA,
-                              const GenContext &Ctx) const;
-  bool appliesToParseLinearTerms(const clang::FunctionDecl *FD,
-                                 const BodyAnalysis &BA,
-                                 const GenContext &Ctx) const;
+class IsInTailPositionExprRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
 
-  std::string applyIsInTailPosition(const clang::FunctionDecl *FD,
-                                    const BodyAnalysis &BA,
-                                    GenContext &Ctx) const;
-  std::string applyIsInTailPositionExpr(const clang::FunctionDecl *FD,
-                                        const BodyAnalysis &BA,
-                                        GenContext &Ctx) const;
-  std::string applyIsPureExprIgnoringRecursiveCallsImpl(
-      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
-      GenContext &Ctx) const;
-  std::string applyIsReturnOrIfReturnOrSwitch(
-      const clang::FunctionDecl *FD, const BodyAnalysis &BA,
-      GenContext &Ctx) const;
-  std::string applyEvalCondition(const clang::FunctionDecl *FD,
-                                 const BodyAnalysis &BA,
-                                 GenContext &Ctx) const;
-  std::string applyParseLinearTerms(const clang::FunctionDecl *FD,
-                                    const BodyAnalysis &BA,
-                                    GenContext &Ctx) const;
+class IsPureExprIgnoringRecursiveCallsRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+class IsReturnOrIfReturnOrSwitchRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+class UnwrapTrailingStmtRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+class FlattenIfElseRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+class EvalConditionRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+class ParseLinearTermsRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
 };
 
 // String structural recursion: explicit-stack state machine for
@@ -148,11 +179,45 @@ class StringStructuralRecursionRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
-  std::string apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
   int cost() const override;
   const char *name() const override;
 };
+
+// ============================================================
+// Rule catalog: centralized names and costs
+// ============================================================
+
+struct RuleInfo {
+  const char *Name;
+  int Cost;
+};
+
+namespace RuleCatalog {
+
+extern const RuleInfo TailRecursion;
+extern const RuleInfo Accumulator;
+extern const RuleInfo Tupling;
+extern const RuleInfo Memoization;
+extern const RuleInfo BinaryStack;
+extern const RuleInfo TreeTraversal;
+extern const RuleInfo IsInTailPosition;
+extern const RuleInfo IsInTailPositionExpr;
+extern const RuleInfo IsPureExprIgnoringRecursiveCalls;
+extern const RuleInfo IsReturnOrIfReturnOrSwitch;
+extern const RuleInfo UnwrapTrailingStmt;
+extern const RuleInfo FlattenIfElse;
+extern const RuleInfo EvalCondition;
+extern const RuleInfo ParseLinearTerms;
+extern const RuleInfo StringStructuralRecursion;
+extern const RuleInfo GenericStack;
+extern const RuleInfo Defunctionalized;
+
+// All rules in the order they are evaluated by the engine.
+const std::vector<const RuleInfo *> &All();
+
+} // namespace RuleCatalog
 
 // Create the default ordered list of transformation rules.
 // Rules are tried in order; the first one that applies wins.

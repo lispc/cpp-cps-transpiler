@@ -207,12 +207,14 @@ private:
       return;
     FunctionDecl *FD = FDIt->second;
     llvm::outs() << "[Detected recursive function] " << Name << "\n";
-    std::string generated = cps::GenerateCPS(FD, Opts.ForceRule, Opts.ExplainSelection);
-    if (!generated.empty()) {
-      GeneratedCode.push_back(generated);
-    } else {
+    cps::CpsResult result =
+        cps::GenerateCPS(FD, Opts.ForceRule, Opts.ExplainSelection);
+    if (cps::IsError(result)) {
+      const cps::CpsError &err = cps::GetError(result);
       llvm::errs() << "[cps-transpiler] Failed to transform " << Name
-                   << " (no applicable rule or unsupported body shape)\n";
+                   << ": " << err.Message << "\n";
+    } else {
+      GeneratedCode.push_back(cps::GetValue(result));
     }
   }
 
@@ -238,16 +240,17 @@ private:
       Group.push_back(It->second);
     }
 
-    std::string generated = cps::GenerateMutualCPS(Group);
-    if (!generated.empty()) {
-      GeneratedCode.push_back(generated);
-    } else {
+    cps::CpsResult result = cps::GenerateMutualCPS(Group);
+    if (cps::IsError(result)) {
+      const cps::CpsError &err = cps::GetError(result);
       llvm::errs() << "[cps-transpiler] Failed to transform mutual group: ";
       for (size_t i = 0; i < SCC.size(); ++i) {
         if (i > 0) llvm::errs() << ", ";
         llvm::errs() << SCC[i];
       }
-      llvm::errs() << "\n";
+      llvm::errs() << ": " << err.Message << "\n";
+    } else {
+      GeneratedCode.push_back(cps::GetValue(result));
     }
   }
 

@@ -1,6 +1,7 @@
 #ifndef TRANSFORMATION_RULE_H
 #define TRANSFORMATION_RULE_H
 
+#include "cps_result.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
@@ -171,6 +172,12 @@ void EmitUnpacksDefun(CodeEmitter &e, const std::string &ArgName,
 std::string EmitFrameStruct(CodeEmitter &e, const clang::FunctionDecl *FD,
                             const GenContext &Ctx);
 
+// Emit a frame struct that stores function parameters plus a set of extra
+// captured local variables. Returns the frame type name (FuncName + "Frame").
+std::string EmitFrameStruct(CodeEmitter &e, const clang::FunctionDecl *FD,
+                            const GenContext &Ctx,
+                            const std::vector<const clang::VarDecl *> &ExtraFields);
+
 // ============================================================
 // Rule interface
 // ============================================================
@@ -184,10 +191,11 @@ public:
                        const BodyAnalysis &BA,
                        const GenContext &Ctx) const = 0;
 
-  // Generate iterative code for the function.
-  virtual std::string apply(const clang::FunctionDecl *FD,
-                            const BodyAnalysis &BA,
-                            GenContext &Ctx) const = 0;
+  // Generate iterative code for the function. Returns either the generated
+  // source string or a structured error describing why generation failed.
+  virtual CpsResult apply(const clang::FunctionDecl *FD,
+                          const BodyAnalysis &BA,
+                          GenContext &Ctx) const = 0;
 
   // Estimated runtime cost of the generated code. Lower is better.
   // Used by the rule engine to pick the best applicable rule.

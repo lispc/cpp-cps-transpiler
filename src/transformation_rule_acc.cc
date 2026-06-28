@@ -81,7 +81,7 @@ bool AccumulatorRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   return IsPureExpr(Step);
 }
 
-std::string AccumulatorRule::apply(const FunctionDecl *FD,
+CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
                                    const BodyAnalysis &BA,
                                    GenContext &Ctx) const {
   const BinaryOperator *BO = dyn_cast<BinaryOperator>(BA.RecExpr);
@@ -121,8 +121,7 @@ std::string AccumulatorRule::apply(const FunctionDecl *FD,
   }
 
   CodeEmitter e;
-  e.raw("// === Generated accumulator code for function: " + Ctx.FuncName +
-        " ===\n\n");
+  EmitGeneratedBanner(e, "accumulator", Ctx.FuncName);
 
   std::string accName = "acc";
   if (!op.empty()) {
@@ -158,19 +157,8 @@ std::string AccumulatorRule::apply(const FunctionDecl *FD,
                 w.line(accName + " = " + funcName + "(" + accName + ", " +
                        StripOuterParens(PrintExpr(Step, Ctx.ASTCtx)) + ");");
               }
-              if (const CallExpr *RecCE = dyn_cast<CallExpr>(RecCall)) {
-                for (unsigned i = 0;
-                     i < FD->getNumParams() && i < RecCE->getNumArgs(); ++i) {
-                  std::string pName = FD->getParamDecl(i)->getNameAsString();
-                  w.line("auto next_" + pName + " = " +
-                         PrintExpr(RecCE->getArg(i), Ctx.ASTCtx) + ";");
-                }
-                for (unsigned i = 0;
-                     i < FD->getNumParams() && i < RecCE->getNumArgs(); ++i) {
-                  std::string pName = FD->getParamDecl(i)->getNameAsString();
-                  w.line(pName + " = next_" + pName + ";");
-                }
-              }
+              EmitTailRecParamUpdate(w, FD, dyn_cast<CallExpr>(RecCall),
+                                     Ctx.ASTCtx);
             });
     b.line("return " + accName + ";");
   });
@@ -178,8 +166,10 @@ std::string AccumulatorRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int AccumulatorRule::cost() const { return 20; }
+int AccumulatorRule::cost() const { return RuleCatalog::Accumulator.Cost; }
 
-const char *AccumulatorRule::name() const { return "AccumulatorRule"; }
+const char *AccumulatorRule::name() const {
+  return RuleCatalog::Accumulator.Name;
+}
 
 } // namespace cps

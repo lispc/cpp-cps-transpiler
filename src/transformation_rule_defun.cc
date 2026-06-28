@@ -35,7 +35,7 @@ bool DefunctionalizedRule::applies(const FunctionDecl *FD,
   return ContainsRecursiveCall(BA.RecExpr, Ctx.FuncName);
 }
 
-std::string DefunctionalizedRule::apply(const FunctionDecl *FD,
+CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
                                         const BodyAnalysis &BA,
                                         GenContext &Ctx) const {
   const Expr *RecExpr = BA.RecExpr;
@@ -287,8 +287,12 @@ std::string DefunctionalizedRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int DefunctionalizedRule::cost() const { return 1000; }
+int DefunctionalizedRule::cost() const {
+  return RuleCatalog::Defunctionalized.Cost;
+}
 
-const char *DefunctionalizedRule::name() const { return "DefunctionalizedRule"; }
+const char *DefunctionalizedRule::name() const {
+  return RuleCatalog::Defunctionalized.Name;
+}
 
 } // namespace cps

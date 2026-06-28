@@ -21,28 +21,30 @@ brew install llvm
 ### 构建
 
 ```bash
-mkdir build && cd build
-cmake .. \
+cmake -B build -S . \
   -DLLVM_DIR=/opt/homebrew/Cellar/llvm/22.1.4/lib/cmake/llvm \
-  -DClang_DIR=/opt/homebrew/Cellar/llvm/22.1.4/lib/cmake/clang
-make -j$(sysctl -n hw.ncpu)
+  -DClang_DIR=/opt/homebrew/Cellar/llvm/22.1.4/lib/cmake/clang \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
 ### 运行
 
 ```bash
 # 转换并打印生成的迭代代码
-./cps-transpiler ../tests/test_input_fib.cc --
+./build/cps-transpiler tests/test_input_fib.cc --
 
 # 保存到文件
-./cps-transpiler ../tests/test_input_fib.cc -- > output.cc
+./build/cps-transpiler tests/test_input_fib.cc -- > output.cc
 ```
 
 ### 测试
 
 ```bash
-python3 run_tests.py
-python3 tests/fuzz_regressions.py   # 随机回归 fuzzing
+python3 run_tests.py              # 直接运行回归测试
+cmake --build build --target check # 通过 CMake 运行测试
+ctest --test-dir build            # 通过 CTest 运行测试
+python3 tests/fuzz_regressions.py # 随机回归 fuzzing
 ```
 
 ### CLI 选项
@@ -451,11 +453,13 @@ int with_local(int n) {
 class TransformationRule {
 public:
   virtual bool applies(const FunctionDecl*, const BodyAnalysis&, const GenContext&) = 0;
-  virtual std::string apply(const FunctionDecl*, const BodyAnalysis&, GenContext&) = 0;
+  virtual CpsResult apply(const FunctionDecl*, const BodyAnalysis&, GenContext&) = 0;
 };
 ```
 
-`applies` 负责**模式识别**，`apply` 负责**代码生成**。新增一种转换模式只需要新增一个规则类并插入 `CreateDefaultRules()` 的合适位置。
+`applies` 负责**模式识别**，`apply` 负责**代码生成**，返回 `CpsResult`（`std::string` 或 `CpsError`），失败时携带具体的错误码和消息而不是空字符串。新增一种转换模式只需要：新增一个规则类，在 `RuleCatalog` 中登记名称/代价，并把它加入默认规则序列。
+
+原来集中在 `StructuralRecursionRule` 里的 8 个手写状态机形状（`IsInTailPosition`、`EvalCondition`、`ParseLinearTerms` 等）已拆分为 `transformation_rule_structural_subrules.cc` 中的独立规则，每个规则只负责一个形状。
 
 #### TailRecursionRule
 
@@ -541,7 +545,9 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k) + const
 - `transformation_rules_helpers` 提供的共享辅助函数：
   - `CollectHoles`：在表达式中收集所有直接递归调用，不进入递归调用自身的参数。
   - `IsInTailPosition` / `ContainsRecursiveCall` / `ExprUsesParams` / `IsPureExpr` 等：供规则与生成器统一使用的 AST 分析工具。
+  - AST 谓词（`IsCallTo`、`ContainsCallTo`、`AnyArgMatches`、`ContainsDeclRefNamed` 等）：直接基于 Clang AST 判断表达式形状，替代早期脆弱的 `PrintExpr` + 字符串查找。
   - `ContainsWholeWord` / `ReplaceWholeWord`：生成代码时使用的整词标识符查找/替换工具。
+  - 代码生成 helper（`EmitExplicitStackLoop`、`EmitFrameUnpacks`、`EmitTailRecParamUpdate`、`EmitGeneratedBanner` 等）：把显式栈循环、帧 unpack、尾递归参数更新等通用模式集中在一处。
 - `BuildFunctionSignature` / `EmitFrameStruct`（`cps_generator.cc`）：生成函数签名和参数帧结构体。
 
 ---
@@ -550,10 +556,12 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k) + const
 
 ```
 cps/
-├── cps.cc                    # 手写 CPS 参考实现（历史遗留）
-├── CMakeLists.txt
+├── examples/
+│   └── cps.cc                # 手写 CPS 参考实现（历史遗留）
+├── CMakeLists.txt            # 构建配置，提供 check/install 目标
 ├── README.md
-├── run_tests.py              # 自动化回归测试
+├── run_tests.py              # 自动化回归测试（用例列表）
+├── cps_testlib.py            # 测试流水线共享库（transpile/compile/run）
 ├── benchmarks/               # 性能对比脚本
 ├── tests/
 │   ├── test_input_*.cc       # 测试输入
@@ -562,10 +570,11 @@ cps/
 └── src/
     ├── main.cc                       # Clang Tooling 前端
     ├── cps_generator.h/.cc           # AST 分析、代码生成入口
+    ├── cps_result.h                  # CpsResult / CpsError 结构化错误类型
     ├── code_emitter.h                # 缩进管理代码生成器
     ├── transformation_rule.h         # BodyAnalysis、GenContext、规则接口
-    ├── transformation_rules.h/.cc    # CreateDefaultRules()
-    ├── transformation_rules_helpers.h/.cc  # 规则与生成器共享的 AST 辅助函数（尾位置检测、递归调用收集、纯度分析、参数使用分析、整词替换等）
+    ├── transformation_rules.h/.cc    # CreateDefaultRules() / RuleCatalog（规则注册表）
+    ├── transformation_rules_helpers.h/.cc  # 规则与生成器共享的 AST 辅助函数与代码生成 helper
     ├── transformation_rule_tail.cc   # TailRecursionRule
     ├── transformation_rule_acc.cc    # AccumulatorRule
     ├── transformation_rule_tupling.cc
@@ -573,6 +582,8 @@ cps/
     ├── transformation_rule_binary.cc
     ├── transformation_rule_generic.cc
     ├── transformation_rule_tree.cc    # TreeTraversalRule（树遍历递归）
+    ├── transformation_rule_string.cc  # StringStructuralRecursionRule
+    ├── transformation_rule_structural_subrules.cc  # 8 个独立的 StructuralRecursion 子规则
     └── transformation_rule_defun.cc
 ```
 
@@ -608,7 +619,7 @@ cps/
 
 ## 参考
 
-- 手写参考：[cps.cc](cps.cc)
+- 手写参考：[examples/cps.cc](examples/cps.cc)
 - [Continuation Passing Style - Wikipedia](https://en.wikipedia.org/wiki/Continuation-passing_style)
 - [Clang LibTooling](https://clang.llvm.org/docs/LibTooling.html)
 - [Recursion Schemes - Wikipedia](https://en.wikipedia.org/wiki/Recursion_schemes)

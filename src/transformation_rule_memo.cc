@@ -71,7 +71,7 @@ bool MemoizationRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   return true;
 }
 
-std::string MemoizationRule::apply(const FunctionDecl *FD,
+CpsResult MemoizationRule::apply(const FunctionDecl *FD,
                                    const BodyAnalysis &BA,
                                    GenContext &Ctx) const {
   const std::string &pName = Ctx.ParamNames[0];
@@ -136,8 +136,10 @@ std::string MemoizationRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int MemoizationRule::cost() const { return 40; }
+int MemoizationRule::cost() const { return RuleCatalog::Memoization.Cost; }
 
-const char *MemoizationRule::name() const { return "MemoizationRule"; }
+const char *MemoizationRule::name() const {
+  return RuleCatalog::Memoization.Name;
+}
 
 } // namespace cps

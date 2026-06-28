@@ -233,12 +233,22 @@ bool TreeTraversalRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   bool IsBoolAllAny = false;
   bool IsAnd = false;
   bool IsVoid = FD->getReturnType()->isVoidType();
-  return IsTreeTraversalShape(CS, Ctx.FuncName, Loop, RecIf, RecCall, IsVoid,
-                               &PostLoopIf, &PostLoopAction,
-                               &IsBoolAllAny, &IsAnd);
+  if (!IsTreeTraversalShape(CS, Ctx.FuncName, Loop, RecIf, RecCall, IsVoid,
+                            &PostLoopIf, &PostLoopAction,
+                            &IsBoolAllAny, &IsAnd))
+    return false;
+
+  // TreeTraversalRule assumes the recursive call is to *this* overload.
+  // Overload-based recursion (e.g. CollectLocalVarDecls) calls a different
+  // FunctionDecl with the same name; transforming it would generate code that
+  // invokes a non-existent overload.
+  if (!RecCall || RecCall->getDirectCallee() != FD)
+    return false;
+
+  return true;
 }
 
-std::string TreeTraversalRule::apply(const FunctionDecl *FD,
+CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                                      const BodyAnalysis &BA,
                                      GenContext &Ctx) const {
   (void)BA;
@@ -669,8 +679,10 @@ std::string TreeTraversalRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int TreeTraversalRule::cost() const { return 150; }
+int TreeTraversalRule::cost() const { return RuleCatalog::TreeTraversal.Cost; }
 
-const char *TreeTraversalRule::name() const { return "TreeTraversalRule"; }
+const char *TreeTraversalRule::name() const {
+  return RuleCatalog::TreeTraversal.Name;
+}
 
 } // namespace cps

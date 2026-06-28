@@ -9,12 +9,14 @@ For each test case in tests/:
   4. Run and verify expected output
 """
 
-import subprocess
 import sys
 import os
-import tempfile
 
-TRANSPILER = "./build/cps-transpiler"
+import cps_testlib as cps
+
+TRANSPILER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "build", "cps-transpiler"
+)
 
 TESTS = [
     {
@@ -2586,89 +2588,705 @@ int main() {
             "leaf = 0",
         ],
     },
+    {
+        "name": "flatten_if_else_original",
+        "input": "tests/test_input_flatten_if_else.cc",
+        "preamble": """
+#include <vector>
+#include <cstdio>
+
+struct ASTContext {};
+struct Expr { int Tag; };
+struct Stmt { virtual ~Stmt() = default; };
+
+struct ReturnStmt : Stmt {
+  const Expr *Ret;
+  ReturnStmt(const Expr *R) : Ret(R) {}
+  const Expr *getRetValue() const { return Ret; }
+};
+
+struct IfStmt : Stmt {
+  const Expr *Cond;
+  const Stmt *Then_;
+  const Stmt *Else_;
+  IfStmt(const Expr *C, const Stmt *T, const Stmt *E = nullptr)
+      : Cond(C), Then_(T), Else_(E) {}
+  const Expr *getCond() const { return Cond; }
+  const Stmt *getThen() const { return Then_; }
+  const Stmt *getElse() const { return Else_; }
+};
+
+struct BaseCase {
+  const Expr *CondExpr;
+  const Expr *ValueExpr;
+};
+
+struct BodyAnalysis {
+  std::vector<BaseCase> BaseCases;
+  const Expr *RecExpr;
+  bool IsRecursive;
+  BodyAnalysis() : RecExpr(nullptr), IsRecursive(false) {}
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+
+const Expr *ExtractReturnExpr(const Stmt *S) {
+  if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S))
+    return RS->getRetValue();
+  return nullptr;
+}
+
+BaseCase MakeBaseCase(const Expr *Cond, const Expr *Value,
+                      const ASTContext *Ctx) {
+  (void)Ctx;
+  BaseCase bc;
+  bc.CondExpr = Cond;
+  bc.ValueExpr = Value;
+  return bc;
+}
+""",
+        "main": """
+int main() {
+  Expr cond5{5}, value5{105};
+  Expr cond10{10}, value10{110};
+  Expr cond15{15}, value15{115};
+  Expr rec{99};
+
+  ReturnStmt retRec(&rec);
+  IfStmt inner(&cond15, new ReturnStmt(&value15), &retRec);
+  IfStmt middle(&cond10, new ReturnStmt(&value10), &inner);
+  IfStmt top(&cond5, new ReturnStmt(&value5), &middle);
+
+  ASTContext ctx;
+  BodyAnalysis ba;
+  FlattenIfElse(&top, ba, &ctx);
+
+  int base_n_5 = 0, base_n_10 = 0, base_n_15 = 0;
+  for (const auto &bc : ba.BaseCases) {
+    if (bc.CondExpr && bc.CondExpr->Tag == 5) base_n_5 = 1;
+    if (bc.CondExpr && bc.CondExpr->Tag == 10) base_n_10 = 1;
+    if (bc.CondExpr && bc.CondExpr->Tag == 15) base_n_15 = 1;
+  }
+  int recursive_call = (ba.IsRecursive && ba.RecExpr && ba.RecExpr->Tag == 99) ? 1 : 0;
+
+  printf("base_n_5 = %d\\n", base_n_5);
+  printf("base_n_10 = %d\\n", base_n_10);
+  printf("base_n_15 = %d\\n", base_n_15);
+  printf("recursive_call = %d\\n", recursive_call);
+  return 0;
+}
+""",
+        "expected": [
+            "base_n_5 = 1",
+            "base_n_10 = 1",
+            "base_n_15 = 1",
+            "recursive_call = 1",
+        ],
+    },
+    {
+        "name": "contains_call_original",
+        "input": "tests/test_input_contains_call.cc",
+        "preamble": """
+#include <vector>
+#include <cstdio>
+
+struct Stmt {
+  virtual ~Stmt() = default;
+  virtual std::vector<const Stmt *> children() const { return {}; }
+};
+
+struct CallExpr : Stmt {};
+
+struct Node : Stmt {
+  std::vector<const Stmt *> kids;
+  Node(std::initializer_list<const Stmt *> ks = {}) : kids(ks) {}
+  std::vector<const Stmt *> children() const override { return kids; }
+};
+""",
+        "main": """
+int main() {
+  CallExpr target;
+  CallExpr orphan;
+  CallExpr missing;
+
+  Node inner({&orphan});
+  Node root({&inner, &target});
+
+  int found = ContainsCall(&root, &target) ? 1 : 0;
+  int not_found = ContainsCall(&root, &missing) ? 1 : 0;
+  int empty = ContainsCall(nullptr, &target) ? 1 : 0;
+
+  printf("found = %d\\n", found);
+  printf("not_found = %d\\n", not_found);
+  printf("empty = %d\\n", empty);
+  return 0;
+}
+""",
+        "expected": [
+            "found = 1",
+            "not_found = 0",
+            "empty = 0",
+        ],
+    },
+    {
+        "name": "find_cond_var_if_original",
+        "input": "tests/test_input_find_cond_var_if.cc",
+        "preamble": """
+#include <vector>
+#include <cstdio>
+
+struct VarDecl {
+  int Id;
+  VarDecl(int I) : Id(I) {}
+};
+
+struct Stmt {
+  virtual ~Stmt() = default;
+  virtual std::vector<const Stmt *> children() const { return {}; }
+};
+
+struct IfStmt : Stmt {
+  const VarDecl *CondVar;
+  std::vector<const Stmt *> kids;
+  IfStmt(const VarDecl *V) : CondVar(V) {}
+  const VarDecl *getConditionVariable() const { return CondVar; }
+  std::vector<const Stmt *> children() const override { return kids; }
+};
+
+struct Node : Stmt {
+  std::vector<const Stmt *> kids;
+  Node(std::initializer_list<const Stmt *> ks = {}) : kids(ks) {}
+  std::vector<const Stmt *> children() const override { return kids; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+int main() {
+  VarDecl vd1(1), vd2(2), vd_missing(99);
+
+  IfStmt if1(&vd1);
+  IfStmt if2(&vd2);
+  Node inner({&if1, &if2});
+  Node root({new Node(), &inner});
+
+  int found_vd1 = FindCondVarIf(&vd1, &root) ? 1 : 0;
+  int found_vd2 = FindCondVarIf(&vd2, &root) ? 1 : 0;
+  int missing = FindCondVarIf(&vd_missing, &root) ? 1 : 0;
+
+  printf("found_vd1 = %d\\n", found_vd1);
+  printf("found_vd2 = %d\\n", found_vd2);
+  printf("missing = %d\\n", missing);
+  return 0;
+}
+""",
+        "expected": [
+            "found_vd1 = 1",
+            "found_vd2 = 1",
+            "missing = 0",
+        ],
+    },
+    {
+        "name": "unwrap_trailing_stmt_original",
+        "input": "tests/test_input_unwrap_trailing_stmt.cc",
+        "preamble": """
+#include <vector>
+#include <cstdio>
+
+struct Stmt {
+  virtual ~Stmt() = default;
+};
+
+struct Plain : Stmt {
+  int Tag;
+  Plain(int T) : Tag(T) {}
+};
+
+struct CompoundStmt : Stmt {
+  std::vector<const Stmt *> body_;
+  bool body_empty() const { return body_.empty(); }
+  const std::vector<const Stmt *> &body() const { return body_; }
+  void add(const Stmt *S) { body_.push_back(S); }
+};
+
+struct IfStmt : Stmt {
+  const Stmt *Then_;
+  const Stmt *Else_;
+  IfStmt(const Stmt *T, const Stmt *E = nullptr) : Then_(T), Else_(E) {}
+  const Stmt *getThen() const { return Then_; }
+  const Stmt *getElse() const { return Else_; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+""",
+        "main": """
+int main() {
+  Plain p1(1), p2(2);
+
+  CompoundStmt cs;
+  cs.add(&p1);
+  cs.add(&p2);
+
+  IfStmt if_no_else(&cs);
+  IfStmt if_with_else(&p1, &p2);
+
+  const Stmt *r1 = UnwrapTrailingStmt(&p1);
+  const Stmt *r2 = UnwrapTrailingStmt(&if_no_else);
+  const Stmt *r3 = UnwrapTrailingStmt(&if_with_else);
+
+  int plain_ok = (r1 == &p1) ? 1 : 0;
+  int nested_ok = (r2 == &p2) ? 1 : 0;
+  int else_ok = (r3 == &if_with_else) ? 1 : 0;
+
+  printf("plain_ok = %d\\n", plain_ok);
+  printf("nested_ok = %d\\n", nested_ok);
+  printf("else_ok = %d\\n", else_ok);
+  return 0;
+}
+""",
+        "expected": [
+            "plain_ok = 1",
+            "nested_ok = 1",
+            "else_ok = 1",
+        ],
+    },
+    {
+        "name": "collect_derived_variables_original",
+        "input": "tests/test_input_collect_derived_variables.cc",
+        "preamble": """
+#include <vector>
+#include <string>
+#include <unordered_set>
+#include <cstdio>
+
+struct ASTContext {};
+
+struct Expr {
+  virtual ~Expr() = default;
+};
+
+struct Decl {
+  virtual ~Decl() = default;
+};
+
+struct VarDecl : Decl {
+  std::string Name;
+  const Expr *Init_;
+  VarDecl(const std::string &N, const Expr *I = nullptr) : Name(N), Init_(I) {}
+  std::string getNameAsString() const { return Name; }
+  const Expr *getInit() const { return Init_; }
+};
+
+struct Stmt {
+  virtual ~Stmt() = default;
+  virtual std::vector<const Stmt *> children() const { return {}; }
+};
+
+struct DeclStmt : Stmt {
+  std::vector<const Decl *> Decls;
+  void add(const Decl *D) { Decls.push_back(D); }
+  const std::vector<const Decl *> &decls() const { return Decls; }
+  std::vector<const Stmt *> children() const override { return {}; }
+};
+
+struct IfStmt : Stmt {
+  const VarDecl *CondVar;
+  std::vector<const Stmt *> Kids;
+  IfStmt(const VarDecl *CV) : CondVar(CV) {}
+  const VarDecl *getConditionVariable() const { return CondVar; }
+  void addChild(const Stmt *S) { Kids.push_back(S); }
+  std::vector<const Stmt *> children() const override { return Kids; }
+};
+
+struct Node : Stmt {
+  std::vector<const Stmt *> Kids;
+  void addChild(const Stmt *S) { Kids.push_back(S); }
+  std::vector<const Stmt *> children() const override { return Kids; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+
+bool IsSubexpressionAccess(const Expr *E, const std::string &ParamName,
+                           const std::unordered_set<std::string> &Derived,
+                           const ASTContext *Ctx) {
+  (void)E;
+  (void)ParamName;
+  (void)Derived;
+  (void)Ctx;
+  return true;
+}
+""",
+        "main": """
+int main() {
+  ASTContext ctx;
+  std::unordered_set<std::string> derived;
+  Expr init;
+
+  VarDecl a("a", &init);
+  VarDecl b("b", &init);
+  VarDecl c("c", &init);
+  VarDecl d("d", &init);
+
+  DeclStmt ds1;
+  ds1.add(&a);
+  ds1.add(&b);
+
+  DeclStmt ds2;
+  ds2.add(&d);
+
+  IfStmt ifs(&c);
+  ifs.addChild(&ds2);
+
+  Node root;
+  root.addChild(&ds1);
+  root.addChild(&ifs);
+
+  CollectDerivedVariables(&root, std::string("base"), derived, &ctx);
+
+  int has_a = derived.count("a") ? 1 : 0;
+  int has_b = derived.count("b") ? 1 : 0;
+  int has_c = derived.count("c") ? 1 : 0;
+  int has_d = derived.count("d") ? 1 : 0;
+
+  printf("has_a = %d\\n", has_a);
+  printf("has_b = %d\\n", has_b);
+  printf("has_c = %d\\n", has_c);
+  printf("has_d = %d\\n", has_d);
+  return 0;
+}
+""",
+        "expected": [
+            "has_a = 1",
+            "has_b = 1",
+            "has_c = 1",
+            "has_d = 1",
+        ],
+    },
+    {
+        "name": "collect_local_var_decls_original",
+        "input": "tests/test_input_collect_local_var_decls.cc",
+        "preamble": """
+#include <vector>
+#include <string>
+#include <cstdio>
+
+struct Decl {
+  virtual ~Decl() = default;
+};
+
+struct VarDecl : Decl {
+  std::string Name;
+  VarDecl(const std::string &N) : Name(N) {}
+  std::string getNameAsString() const { return Name; }
+};
+
+struct Stmt {
+  virtual ~Stmt() = default;
+};
+
+struct DeclStmt : Stmt {
+  std::vector<const Decl *> Decls;
+  void add(const Decl *D) { Decls.push_back(D); }
+  const std::vector<const Decl *> &decls() const { return Decls; }
+};
+
+template <typename T, typename U>
+const T *dyn_cast(const U *P) { return dynamic_cast<const T *>(P); }
+
+void CollectLocalVarDecls(const Stmt *S,
+                          std::vector<const VarDecl *> &Out) {
+  if (!S)
+    return;
+  if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+    for (const Decl *D : DS->decls()) {
+      if (const VarDecl *VD = dyn_cast<VarDecl>(D))
+        Out.push_back(VD);
+    }
+  }
+}
+
+void CollectLocalVarDecls(const std::vector<const Stmt *> &Stmts,
+                          std::vector<const VarDecl *> &Out) {
+  for (const Stmt *S : Stmts)
+    CollectLocalVarDecls(S, Out);
+}
+""",
+        "main": """
+int main() {
+  VarDecl a("a"), b("b"), c("c");
+
+  DeclStmt ds1;
+  ds1.add(&a);
+  ds1.add(&b);
+
+  DeclStmt ds2;
+  ds2.add(&c);
+
+  std::vector<const Stmt *> stmts;
+  stmts.push_back(&ds1);
+  stmts.push_back(&ds2);
+
+  std::vector<const VarDecl *> out;
+  CollectLocalVarDecls(stmts, out);
+
+  int has_a = 0, has_b = 0, has_c = 0;
+  for (const VarDecl *VD : out) {
+    if (VD->getNameAsString() == "a") has_a = 1;
+    if (VD->getNameAsString() == "b") has_b = 1;
+    if (VD->getNameAsString() == "c") has_c = 1;
+  }
+
+  printf("has_a = %d\\n", has_a);
+  printf("has_b = %d\\n", has_b);
+  printf("has_c = %d\\n", has_c);
+  return 0;
+}
+""",
+        "expected": [
+            "has_a = 1",
+            "has_b = 1",
+            "has_c = 1",
+        ],
+    },
+    {
+        "name": "find_sccs_lambda_original",
+        "input": "tests/test_input_find_sccs.cc",
+        "preamble": """
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <functional>
+#include <algorithm>
+#include <cstdio>
+
+static std::vector<std::vector<std::string>>
+FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> &Graph) {
+  std::vector<std::vector<std::string>> SCCs;
+  std::unordered_map<std::string, int> Index;
+  std::unordered_map<std::string, int> LowLink;
+  std::unordered_set<std::string> OnStack;
+  std::vector<std::string> Stack;
+  int idx = 0;
+
+  std::function<void(const std::string &)> strongconnect =
+      [&](const std::string &Name) {
+    Index[Name] = idx;
+    LowLink[Name] = idx;
+    ++idx;
+    Stack.push_back(Name);
+    OnStack.insert(Name);
+
+    auto It = Graph.find(Name);
+    if (It != Graph.end()) {
+      for (const std::string &Next : It->second) {
+        if (!Graph.count(Next))
+          continue;
+        if (!Index.count(Next)) {
+          strongconnect(Next);
+          LowLink[Name] = std::min(LowLink[Name], LowLink[Next]);
+        } else if (OnStack.count(Next)) {
+          LowLink[Name] = std::min(LowLink[Name], Index[Next]);
+        }
+      }
+    }
+
+    if (LowLink[Name] == Index[Name]) {
+      std::vector<std::string> SCC;
+      while (true) {
+        std::string W = Stack.back();
+        Stack.pop_back();
+        OnStack.erase(W);
+        SCC.push_back(W);
+        if (W == Name) break;
+      }
+      SCCs.push_back(SCC);
+    }
+  };
+
+  for (const auto &KV : Graph) {
+    if (!Index.count(KV.first))
+      strongconnect(KV.first);
+  }
+  return SCCs;
+}
+""",
+        "main": """
+int main() {
+  std::unordered_map<std::string, std::unordered_set<std::string>> g;
+  g["a"].insert("b");
+  g["b"].insert("a");
+  g["b"].insert("c");
+  g["c"].insert("c");
+  g["d"].insert("e");
+  g["e"].insert("d");
+
+  auto sccs = FindSCCs(g);
+  int scc_ab = 0, scc_c = 0, scc_de = 0;
+  for (const auto &scc : sccs) {
+    bool has_a = false, has_b = false, has_c_node = false, has_d = false, has_e = false;
+    for (const auto &n : scc) {
+      if (n == "a") has_a = true;
+      if (n == "b") has_b = true;
+      if (n == "c") has_c_node = true;
+      if (n == "d") has_d = true;
+      if (n == "e") has_e = true;
+    }
+    if (has_a && has_b && scc.size() == 2) scc_ab = 1;
+    if (has_c_node && scc.size() == 1) scc_c = 1;
+    if (has_d && has_e && scc.size() == 2) scc_de = 1;
+  }
+
+  printf("scc_ab = %d\\n", scc_ab);
+  printf("scc_c = %d\\n", scc_c);
+  printf("scc_de = %d\\n", scc_de);
+  return 0;
+}
+""",
+        "expected": [
+            "scc_ab = 1",
+            "scc_c = 1",
+            "scc_de = 1",
+        ],
+    },
+    {
+        "name": "fib_cps_original",
+        "input": "tests/test_input_fib_cps.cc",
+        "preamble": """
+#include <cstdio>
+
+class UtilFunc;
+
+class FibArg {
+public:
+  int x;
+  UtilFunc *f;
+  FibArg(int x, UtilFunc *f) : x(x), f(f) {}
+};
+
+template <typename Arg>
+class Unit {
+public:
+  Arg arg;
+  Unit<Arg> (*nextf)(Arg);
+  bool finished;
+  Unit(Arg arg, Unit<Arg> (*nextf)(Arg), bool finished)
+      : arg(arg), nextf(nextf), finished(finished) {}
+};
+
+Unit<FibArg> advance(FibArg);
+Unit<FibArg> fib_rec_cps(FibArg);
+
+class UtilFunc {
+public:
+  virtual Unit<FibArg> eval(int x) {
+    return Unit<FibArg>((FibArg(x, this)), advance, true);
+  }
+};
+
+class AddClosure : public UtilFunc {
+public:
+  FibArg arg;
+  AddClosure(FibArg arg) : arg(arg) {}
+  Unit<FibArg> eval(int y) {
+    return Unit<FibArg>(FibArg(arg.x + y, arg.f), advance, false);
+  }
+};
+
+class FibClosure : public UtilFunc {
+public:
+  FibArg arg;
+  FibClosure(FibArg arg) : arg(arg) {}
+  Unit<FibArg> eval(int y) {
+    return Unit<FibArg>(FibArg(arg.x, new AddClosure(FibArg(y, arg.f))),
+                        fib_rec_cps, false);
+  }
+};
+
+Unit<FibArg> fib_rec_cps(FibArg arg) {
+  return arg.x < 2
+             ? Unit<FibArg>(FibArg(1, arg.f), advance, false)
+             : Unit<FibArg>(
+                   FibArg(arg.x - 2, new FibClosure(FibArg(arg.x - 1, arg.f))),
+                   fib_rec_cps, false);
+}
+
+Unit<FibArg> advance(FibArg arg) {
+  auto res = arg.f->eval(arg.x);
+  delete arg.f;
+  return res;
+}
+
+template <typename Arg>
+Arg trampoline(Unit<Arg> t) {
+  auto pp = t;
+  while (1) {
+    if (pp.finished)
+      return pp.arg;
+    pp = pp.nextf(pp.arg);
+  }
+}
+""",
+        "main": """
+int main() {
+  int fib0 = trampoline(Unit<FibArg>(FibArg(0, new UtilFunc()), fib_rec_cps, false)).x;
+  int fib1 = trampoline(Unit<FibArg>(FibArg(1, new UtilFunc()), fib_rec_cps, false)).x;
+  int fib2 = trampoline(Unit<FibArg>(FibArg(2, new UtilFunc()), fib_rec_cps, false)).x;
+  int fib3 = trampoline(Unit<FibArg>(FibArg(3, new UtilFunc()), fib_rec_cps, false)).x;
+  int fib4 = trampoline(Unit<FibArg>(FibArg(4, new UtilFunc()), fib_rec_cps, false)).x;
+  int fib5 = trampoline(Unit<FibArg>(FibArg(5, new UtilFunc()), fib_rec_cps, false)).x;
+
+  printf("fib0 = %d\\n", fib0);
+  printf("fib1 = %d\\n", fib1);
+  printf("fib2 = %d\\n", fib2);
+  printf("fib3 = %d\\n", fib3);
+  printf("fib4 = %d\\n", fib4);
+  printf("fib5 = %d\\n", fib5);
+  return 0;
+}
+""",
+        "expected": [
+            "fib0 = 1",
+            "fib1 = 1",
+            "fib2 = 2",
+            "fib3 = 3",
+            "fib4 = 5",
+            "fib5 = 8",
+        ],
+    },
 ]
 
 
 def run_test(test):
     print(f"--- Testing {test['name']} ---")
 
-    # 1. Run transpiler
-    result = subprocess.run(
-        [TRANSPILER, test["input"], "--"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"FAIL: transpiler exited with code {result.returncode}")
-        print(result.stderr)
+    try:
+        raw = cps.run_transpiler(TRANSPILER, test["input"])
+        generated = cps.strip_diagnostic_lines(raw)
+        out = cps.compile_and_run(
+            generated, test["main"], test.get("preamble")
+        )
+        cps.check_output(out, test["expected"])
+        print("PASS")
+        return True
+    except cps.CpsTestError as e:
+        print(f"FAIL: {e.stage}")
+        if e.message:
+            print(e.message)
+        if e.stderr:
+            print(e.stderr)
+        if e.stage == "verify" and e.stdout:
+            print("Expected:")
+            for line in test["expected"]:
+                print(f"  {line}")
+            print("Actual:")
+            for line in e.stdout.splitlines():
+                print(f"  {line}")
         return False
-
-    # 2. Strip diagnostic lines
-    lines = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[Detected"):
-            continue
-        if stripped.startswith("// =="):
-            continue
-        if stripped.startswith("// Generated"):
-            continue
-        lines.append(line)
-    generated = "\n".join(lines)
-
-    # 3. Write combined source
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".cc", delete=False
-    ) as f:
-        if "preamble" in test:
-            f.write(test["preamble"])
-            f.write("\n")
-        f.write(generated)
-        f.write("\n")
-        f.write(test["main"])
-        src_path = f.name
-
-    # 4. Compile
-    exe_path = src_path.replace(".cc", "")
-    compile_result = subprocess.run(
-        ["clang++", "-std=c++17", src_path, "-o", exe_path],
-        capture_output=True,
-        text=True,
-    )
-    if compile_result.returncode != 0:
-        print(f"FAIL: compilation failed")
-        print(compile_result.stderr)
-        os.unlink(src_path)
-        return False
-
-    # 5. Run
-    run_result = subprocess.run([exe_path], capture_output=True, text=True)
-    if run_result.returncode != 0:
-        print(f"FAIL: runtime error")
-        print(run_result.stderr)
-        os.unlink(src_path)
-        os.unlink(exe_path)
-        return False
-
-    # 6. Verify output
-    actual_lines = [line.rstrip() for line in run_result.stdout.splitlines()]
-    expected_lines = test["expected"]
-    if actual_lines != expected_lines:
-        print(f"FAIL: output mismatch")
-        print("Expected:")
-        for line in expected_lines:
-            print(f"  {line}")
-        print("Actual:")
-        for line in actual_lines:
-            print(f"  {line}")
-        os.unlink(src_path)
-        os.unlink(exe_path)
-        return False
-
-    print(f"PASS")
-    os.unlink(src_path)
-    os.unlink(exe_path)
-    return True
 
 
 def main():

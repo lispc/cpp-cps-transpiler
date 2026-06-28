@@ -32,7 +32,7 @@ bool GenericStackRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   return true;
 }
 
-std::string GenericStackRule::apply(const FunctionDecl *FD,
+CpsResult GenericStackRule::apply(const FunctionDecl *FD,
                                     const BodyAnalysis &BA,
                                     GenContext &Ctx) const {
   std::vector<CallExpr *> holes;
@@ -88,57 +88,16 @@ std::string GenericStackRule::apply(const FunctionDecl *FD,
                         middleCaptured.end());
 
   CodeEmitter e;
-  e.raw("// === Generated generic-stack code for function: " + Ctx.FuncName +
-        " ===\n\n");
-  e.line("#include <vector>");
+  EmitGeneratedBanner(e, "generic-stack", Ctx.FuncName);
+  std::vector<std::string> headers = {"vector"};
   if (needsAlgorithm)
-    e.line("#include <algorithm>");
-  e.nl();
+    headers.push_back("algorithm");
+  EmitIncludes(e, headers);
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
   // Frame struct with parameters + captured locals.
-  std::string frameName = Ctx.FuncName + "Frame";
-  e.block("struct " + frameName, [&](CodeEmitter &b) {
-    for (unsigned i = 0; i < FD->getNumParams(); ++i)
-      b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
-             FD->getParamDecl(i)->getNameAsString() + ";");
-    for (const VarDecl *VD : capturedLocals)
-      b.line(NormalizeTypeName(VD->getType().getAsString()) + " " +
-             VD->getNameAsString() + ";");
-    std::string ctor = frameName + "(";
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (i > 0)
-        ctor += ", ";
-      ctor += GetParamStorageType(FD->getParamDecl(i)) + " " +
-              FD->getParamDecl(i)->getNameAsString() + "_";
-    }
-    for (const VarDecl *VD : capturedLocals) {
-      if (!ctor.empty() && ctor.back() != '(')
-        ctor += ", ";
-      ctor += NormalizeTypeName(VD->getType().getAsString()) + " " +
-              VD->getNameAsString() + "_";
-    }
-    ctor += ")";
-    std::string init;
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      std::string p = FD->getParamDecl(i)->getNameAsString();
-      if (!init.empty())
-        init += ", ";
-      init += p + "(" + p + "_)";
-    }
-    for (const VarDecl *VD : capturedLocals) {
-      std::string n = VD->getNameAsString();
-      if (!init.empty())
-        init += ", ";
-      init += n + "(" + n + "_)";
-    }
-    if (!init.empty())
-      ctor += " : " + init;
-    ctor += " {}";
-    b.line(ctor);
-  }, ";");
-  e.nl();
+  std::string frameName = EmitFrameStruct(e, FD, Ctx, capturedLocals);
 
   std::string entryName = Ctx.FuncName + "StackEntry";
   e.block("struct " + entryName, [&](CodeEmitter &b) {
@@ -186,11 +145,7 @@ std::string GenericStackRule::apply(const FunctionDecl *FD,
       w.block("if (entry.tag == " + entryName + "::Tag::Marker)",
               [&](CodeEmitter &iw) {
         iw.line("auto cur = entry.frame;");
-        for (const auto &p : Ctx.ParamNames)
-          iw.line("auto " + p + " = cur." + p + ";");
-        for (const VarDecl *VD : capturedLocals)
-          iw.line("auto " + VD->getNameAsString() + " = cur." +
-                  VD->getNameAsString() + ";");
+        EmitFrameUnpacks(iw, Ctx, capturedLocals);
         for (size_t i = 0; i < holes.size(); ++i) {
           iw.line(Ctx.RetType + " v" + std::to_string(i) +
                   " = values.back();");
@@ -200,11 +155,7 @@ std::string GenericStackRule::apply(const FunctionDecl *FD,
       });
       w.block("else", [&](CodeEmitter &iw) {
         iw.line("auto cur = entry.frame;");
-        for (const auto &p : Ctx.ParamNames)
-          iw.line("auto " + p + " = cur." + p + ";");
-        for (const VarDecl *VD : capturedLocals)
-          iw.line("auto " + VD->getNameAsString() + " = cur." +
-                  VD->getNameAsString() + ";");
+        EmitFrameUnpacks(iw, Ctx, capturedLocals);
         for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
           std::string prefix = (bi == 0) ? "if (" : "else if (";
           const auto &bc = BA.BaseCases[bi];
@@ -261,8 +212,10 @@ std::string GenericStackRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int GenericStackRule::cost() const { return 200; }
+int GenericStackRule::cost() const { return RuleCatalog::GenericStack.Cost; }
 
-const char *GenericStackRule::name() const { return "GenericStackRule"; }
+const char *GenericStackRule::name() const {
+  return RuleCatalog::GenericStack.Name;
+}
 
 } // namespace cps

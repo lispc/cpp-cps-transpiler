@@ -4,6 +4,7 @@
 #include "code_emitter.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/Stmt.h"
 #include <cctype>
 #include <string>
@@ -28,30 +29,23 @@ bool TypeContains(const std::string &T, const std::string &Pattern) {
   return normalized.find(Pattern) != std::string::npos;
 }
 
-bool IsSubexprAccessor(const std::string &S) {
-  return S.find("getLHS") != std::string::npos ||
-         S.find("getRHS") != std::string::npos ||
-         S.find("getSubExpr") != std::string::npos ||
-         S.find("getArg") != std::string::npos ||
-         S.find("getCond") != std::string::npos ||
-         S.find("getTrueExpr") != std::string::npos ||
-         S.find("getFalseExpr") != std::string::npos ||
-         S.find("getBase") != std::string::npos ||
-         S.find("getIdx") != std::string::npos ||
-         S.find("getCallee") != std::string::npos;
-}
+static const std::vector<std::string> kSubexprAccessors = {
+    "getLHS",     "getRHS",      "getSubExpr", "getArg",
+    "getCond",    "getTrueExpr", "getFalseExpr", "getBase",
+    "getIdx",     "getCallee"};
 
-std::string StripOuterParens(std::string s) {
-  while (s.size() >= 2 && s.front() == '(' && s.back() == ')') {
-    s = s.substr(1, s.size() - 2);
-  }
-  return s;
-}
-
-bool IsDerivedName(const std::string &Name, const std::string &ParamName,
+// Return true if E is a DeclRefExpr that names ParamName or a variable in the
+// derived set.
+bool IsDerivedExpr(const Expr *E, const std::string &ParamName,
                    const std::unordered_set<std::string> &Derived) {
-  std::string s = StripOuterParens(Name);
-  return s == ParamName || Derived.count(s);
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Clean)) {
+    std::string Name = DRE->getDecl()->getNameAsString();
+    return Name == ParamName || Derived.count(Name);
+  }
+  return false;
 }
 
 // Check whether E is a sub-expression access of the first parameter or of a
@@ -59,31 +53,31 @@ bool IsDerivedName(const std::string &Name, const std::string &ParamName,
 bool IsSubexpressionAccess(const Expr *E, const std::string &ParamName,
                            const std::unordered_set<std::string> &Derived,
                            const ASTContext *Ctx) {
+  (void)Ctx;
   if (!E)
     return false;
   E = E->IgnoreParenImpCasts();
 
-  std::string s = PrintExpr(E, Ctx);
+  const CallExpr *CE = dyn_cast<CallExpr>(E);
+  if (!CE)
+    return false;
+
+  std::string Name = GetCalleeName(CE);
 
   // dyn_cast<T>(base)
-  if (s.find("dyn_cast") != std::string::npos) {
-    if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-      if (CE->getNumArgs() == 1) {
-        std::string base =
-            StripOuterParens(PrintExpr(CE->getArg(0), Ctx));
-        if (IsDerivedName(base, ParamName, Derived))
-          return true;
-      }
-    }
+  if (Name == "dyn_cast" || Name == "dyn_cast_or_null") {
+    if (CE->getNumArgs() >= 1)
+      return IsDerivedExpr(CE->getArg(0), ParamName, Derived);
+    return false;
   }
 
   // base->accessor()
-  if (IsSubexprAccessor(s)) {
-    size_t pos = s.find("->");
-    if (pos != std::string::npos) {
-      std::string base = StripOuterParens(s.substr(0, pos));
-      if (IsDerivedName(base, ParamName, Derived))
-        return true;
+  for (const std::string &Acc : kSubexprAccessors) {
+    if (Name == Acc) {
+      if (const CXXMemberCallExpr *MCE = dyn_cast<CXXMemberCallExpr>(CE))
+        return IsDerivedExpr(MCE->getImplicitObjectArgument(), ParamName,
+                             Derived);
+      return false;
     }
   }
 
@@ -190,7 +184,7 @@ bool StringStructuralRecursionRule::applies(const FunctionDecl *FD,
   return IsStringStructuralRecursionShape(FD, Ctx);
 }
 
-std::string StringStructuralRecursionRule::apply(const FunctionDecl *FD,
+CpsResult StringStructuralRecursionRule::apply(const FunctionDecl *FD,
                                                  const BodyAnalysis &BA,
                                                  GenContext &Ctx) const {
   (void)BA;
@@ -403,10 +397,12 @@ std::string StringStructuralRecursionRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int StringStructuralRecursionRule::cost() const { return 150; }
+int StringStructuralRecursionRule::cost() const {
+  return RuleCatalog::StringStructuralRecursion.Cost;
+}
 
 const char *StringStructuralRecursionRule::name() const {
-  return "StringStructuralRecursionRule";
+  return RuleCatalog::StringStructuralRecursion.Name;
 }
 
 } // namespace cps

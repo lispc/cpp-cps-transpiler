@@ -61,7 +61,7 @@ bool BinaryStackRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                                   rightArgs, Ctx.ASTCtx);
 }
 
-std::string BinaryStackRule::apply(const FunctionDecl *FD,
+CpsResult BinaryStackRule::apply(const FunctionDecl *FD,
                                    const BodyAnalysis &BA,
                                    GenContext &Ctx) const {
   const BinaryOperator *BO =
@@ -96,42 +96,47 @@ std::string BinaryStackRule::apply(const FunctionDecl *FD,
     combine = "result |= ";
   }
 
+  auto buildInitArgs = [&]() {
+    std::string s;
+    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      if (i > 0)
+        s += ", ";
+      s += FD->getParamDecl(i)->getNameAsString();
+    }
+    return s;
+  };
+
+  auto buildPushArgs = [&](const std::vector<std::string> &src) {
+    std::string s;
+    for (unsigned i = 0;
+         i < FD->getNumParams() && i < src.size(); ++i) {
+      if (i > 0)
+        s += ", ";
+      s += ReplaceParamsWithCur(src[i], Ctx.ParamNames);
+    }
+    return s;
+  };
+
   CodeEmitter e;
-  e.raw("// === Generated binary-stack code for function: " + Ctx.FuncName +
-        " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  EmitGeneratedBanner(e, "binary-stack", Ctx.FuncName);
+  EmitIncludes(e, {"vector"});
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string frameName = EmitFrameStruct(e, FD, Ctx);
 
   e.block(sig, [&](CodeEmitter &b) {
     b.line("std::vector<" + frameName + "> stack;");
-    {
-      std::string init = "stack.emplace_back(";
-      for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-        if (i > 0)
-          init += ", ";
-        init += FD->getParamDecl(i)->getNameAsString();
-      }
-      init += ");";
-      b.line(init);
-    }
+    EmitStackPush(b, buildInitArgs());
     b.line(Ctx.RetType + " result = " + identity + ";");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("auto cur = stack.back();");
-      w.line("stack.pop_back();");
+    EmitExplicitStackLoop(b, frameName, [&](CodeEmitter &w) {
       EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
       for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
         std::string prefix = (bi == 0) ? "if (" : "else if (";
         const auto &bc = BA.BaseCases[bi];
-        w.line(prefix + ReplaceParamsWithCur(bc.CondStr,
-                                             Ctx.ParamNames) +
+        w.line(prefix + ReplaceParamsWithCur(bc.CondStr, Ctx.ParamNames) +
                ") {");
         w.inc();
-        w.line(combine +
-               ReplaceParamsWithCur(bc.ValueStr,
-                                    Ctx.ParamNames) +
+        w.line(combine + ReplaceParamsWithCur(bc.ValueStr, Ctx.ParamNames) +
                ";");
         w.dec();
         w.line("}");
@@ -139,28 +144,8 @@ std::string BinaryStackRule::apply(const FunctionDecl *FD,
       w.line("else {");
       w.inc();
       EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
-      {
-        std::string push = "stack.emplace_back(";
-        for (unsigned i = 0;
-             i < FD->getNumParams() && i < rightArgs.size(); ++i) {
-          if (i > 0)
-            push += ", ";
-          push += ReplaceParamsWithCur(rightArgs[i], Ctx.ParamNames);
-        }
-        push += ");";
-        w.line(push);
-      }
-      {
-        std::string push = "stack.emplace_back(";
-        for (unsigned i = 0;
-             i < FD->getNumParams() && i < leftArgs.size(); ++i) {
-          if (i > 0)
-            push += ", ";
-          push += ReplaceParamsWithCur(leftArgs[i], Ctx.ParamNames);
-        }
-        push += ");";
-        w.line(push);
-      }
+      EmitStackPush(w, buildPushArgs(rightArgs));
+      EmitStackPush(w, buildPushArgs(leftArgs));
       w.dec();
       w.line("}");
     });
@@ -170,8 +155,10 @@ std::string BinaryStackRule::apply(const FunctionDecl *FD,
   return e.str();
 }
 
-int BinaryStackRule::cost() const { return 100; }
+int BinaryStackRule::cost() const { return RuleCatalog::BinaryStack.Cost; }
 
-const char *BinaryStackRule::name() const { return "BinaryStackRule"; }
+const char *BinaryStackRule::name() const {
+  return RuleCatalog::BinaryStack.Name;
+}
 
 } // namespace cps

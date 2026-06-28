@@ -1,1 +1,20 @@
+# Build outputs
 build/
+*.o
+*.a
+*.so
+*.dylib
+cps-transpiler
+
+# Python virtualenv and cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

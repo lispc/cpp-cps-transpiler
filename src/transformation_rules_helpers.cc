@@ -848,4 +848,211 @@ void EmitTargetedUnpacks(CodeEmitter &e, const std::string &ArgName,
     e.line("auto " + p + " = " + ArgName + "." + p + ";");
 }
 
+// ============================================================
+// AST predicates
+// ============================================================
+
+std::string GetCalleeName(const CallExpr *CE) {
+  if (!CE)
+    return "";
+  if (const CXXMemberCallExpr *MCE = dyn_cast<CXXMemberCallExpr>(CE)) {
+    if (const CXXMethodDecl *MD = MCE->getMethodDecl())
+      return MD->getNameAsString();
+  }
+  if (const FunctionDecl *FD = CE->getDirectCallee())
+    return FD->getNameAsString();
+  return "";
+}
+
+bool IsCallTo(const Expr *E, const std::string &Name) {
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean))
+    return GetCalleeName(CE) == Name;
+  return false;
+}
+
+bool AnyArgIsCallTo(const CallExpr *CE, const std::string &Name) {
+  if (!CE)
+    return false;
+  for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+    if (IsCallTo(CE->getArg(i), Name))
+      return true;
+  }
+  return false;
+}
+
+bool AnyArgIsCallToPrefix(const CallExpr *CE, const std::string &Prefix) {
+  if (!CE)
+    return false;
+  for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+    const Expr *Arg = CE->getArg(i)->IgnoreParenImpCasts();
+    if (const CallExpr *ArgCE = dyn_cast<CallExpr>(Arg)) {
+      std::string name = GetCalleeName(ArgCE);
+      if (name.size() >= Prefix.size() &&
+          name.compare(0, Prefix.size(), Prefix) == 0)
+        return true;
+    }
+  }
+  return false;
+}
+
+bool AnyArgIsCallToOneOf(const CallExpr *CE,
+                         const std::vector<std::string> &Names) {
+  if (!CE)
+    return false;
+  for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+    const Expr *Arg = CE->getArg(i)->IgnoreParenImpCasts();
+    if (const CallExpr *ArgCE = dyn_cast<CallExpr>(Arg)) {
+      std::string name = GetCalleeName(ArgCE);
+      for (const std::string &N : Names) {
+        if (name == N)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool ContainsCallTo(const Expr *E, const std::string &Name) {
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
+    if (GetCalleeName(CE) == Name)
+      return true;
+  }
+  for (const Stmt *Child : Clean->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
+      if (ContainsCallTo(ChildExpr, Name))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsCallToPrefix(const Expr *E, const std::string &Prefix) {
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
+    std::string name = GetCalleeName(CE);
+    if (name.size() >= Prefix.size() &&
+        name.compare(0, Prefix.size(), Prefix) == 0)
+      return true;
+  }
+  for (const Stmt *Child : Clean->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
+      if (ContainsCallToPrefix(ChildExpr, Prefix))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsCallToOneOf(const Expr *E,
+                         const std::vector<std::string> &Names) {
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
+    std::string name = GetCalleeName(CE);
+    for (const std::string &N : Names) {
+      if (name == N)
+        return true;
+    }
+  }
+  for (const Stmt *Child : Clean->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
+      if (ContainsCallToOneOf(ChildExpr, Names))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsDeclRefNamed(const Expr *E, const std::string &Name) {
+  if (!E)
+    return false;
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Clean)) {
+    if (DRE->getDecl()->getNameAsString() == Name)
+      return true;
+  }
+  for (const Stmt *Child : Clean->children()) {
+    if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
+      if (ContainsDeclRefNamed(ChildExpr, Name))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool AnyArgMatches(const CallExpr *CE,
+                   const std::vector<std::string> &CallNames,
+                   const std::vector<std::string> &DeclNames) {
+  if (!CE)
+    return false;
+  for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+    const Expr *Arg = CE->getArg(i)->IgnoreParenImpCasts();
+    if (ContainsCallToOneOf(Arg, CallNames))
+      return true;
+    for (const std::string &N : DeclNames) {
+      if (ContainsDeclRefNamed(Arg, N))
+        return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================
+// Shared code-generation helpers
+// ============================================================
+
+void EmitGeneratedBanner(CodeEmitter &e, const std::string &Kind,
+                         const std::string &FuncName) {
+  e.raw("// === Generated " + Kind + " code for function: " + FuncName +
+        " ===\n\n");
+}
+
+void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers) {
+  for (const auto &h : Headers)
+    e.line("#include <" + h + ">");
+  if (!Headers.empty())
+    e.nl();
+}
+
+void EmitFrameUnpacks(CodeEmitter &e, const GenContext &Ctx,
+                      const std::vector<const VarDecl *> &Locals,
+                      const std::string &CurName) {
+  for (const auto &p : Ctx.ParamNames)
+    e.line("auto " + p + " = " + CurName + "." + p + ";");
+  for (const VarDecl *VD : Locals)
+    e.line("auto " + VD->getNameAsString() + " = " + CurName + "." +
+           VD->getNameAsString() + ";");
+}
+
+void EmitStackPush(CodeEmitter &e, const std::string &Args) {
+  e.line("stack.emplace_back(" + Args + ");");
+}
+
+void EmitTailRecParamUpdate(CodeEmitter &e, const FunctionDecl *FD,
+                            const CallExpr *RecCall,
+                            const ASTContext *Ctx) {
+  if (!RecCall)
+    return;
+  for (unsigned i = 0;
+       i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
+    std::string pName = FD->getParamDecl(i)->getNameAsString();
+    e.line("auto next_" + pName + " = " +
+           PrintExpr(RecCall->getArg(i), Ctx) + ";");
+  }
+  for (unsigned i = 0;
+       i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
+    std::string pName = FD->getParamDecl(i)->getNameAsString();
+    e.line(pName + " = next_" + pName + ";");
+  }
+}
+
 } // namespace cps

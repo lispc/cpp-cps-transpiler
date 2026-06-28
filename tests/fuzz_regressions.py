@@ -10,17 +10,23 @@ inputs.
 
 import os
 import random
-import subprocess
 import sys
 import tempfile
 
-TRANSPILER = "./build/cps-transpiler"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import cps_testlib as cps
+
+TRANSPILER = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "build",
+    "cps-transpiler",
+)
 NUM_CASES = 50
 MAX_N = 20  # Keep inputs small so recursive reference does not blow the stack.
 
 
 def generate_function(idx):
-    """Generate a random recursive function string and its name."""
+    """Generate a recursive function string and its name."""
     name = f"fuzz_{idx}"
     k = random.choice([2, 3])
     base_values = [random.randint(-5, 5) for _ in range(k)]
@@ -47,27 +53,6 @@ def generate_function(idx):
     return name, "\n".join(lines)
 
 
-def run_transpiler(input_path):
-    result = subprocess.run(
-        [TRANSPILER, input_path, "--"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None, result.stderr
-    lines = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[Detected"):
-            continue
-        if stripped.startswith("// ="):
-            continue
-        if stripped.startswith("// Generated"):
-            continue
-        lines.append(line)
-    return "\n".join(lines), None
-
-
 def check_case(idx):
     name, original = generate_function(idx)
 
@@ -76,61 +61,52 @@ def check_case(idx):
         with open(input_path, "w") as f:
             f.write(original)
 
-        generated, err = run_transpiler(input_path)
-        if generated is None:
-            print(f"Case {idx}: transpiler failed for:\n{original}\n{err}")
+        try:
+            raw = cps.run_transpiler(TRANSPILER, input_path)
+            generated = cps.strip_diagnostic_lines(raw)
+        except cps.CpsTestError as e:
+            print(f"Case {idx}: transpiler failed for:\n{original}\n{e.stderr}")
             return False
+
         if not generated.strip():
             print(f"Case {idx}: no rule applied for:\n{original}")
             return False
 
-        # Build a check program containing the generated code and a renamed
-        # reference recursive function.
-        renamed = original.replace(f"int {name}(int n)", f"int ref_{name}(int n)")
-        main_lines = ["#include <iostream>", "#include <cstdlib>"]
-        main_lines.append(generated)
-        main_lines.append(renamed)
-        main_lines.append("int main() {")
-        main_lines.append(f"  for (int n = 0; n <= {MAX_N}; ++n) {{")
-        main_lines.append(
-            f"    int a = {name}(n);"
+        # Reference recursive implementation renamed so it does not clash with
+        # the generated iterative version. It is appended after the generated
+        # code so that the iterative definition is visible first.
+        renamed = original.replace(
+            f"int {name}(int n)", f"int ref_{name}(int n)"
         )
-        main_lines.append(
-            f"    int b = ref_{name}(n);"
-        )
-        main_lines.append(
-            "    if (a != b) {"
-        )
-        main_lines.append(
-            f"      std::cout << \"{name}(\" << n << \") mismatch: \""
-        )
-        main_lines.append(
-            "                << a << \" vs \" << b << std::endl;"
-        )
-        main_lines.append("      return 1;")
-        main_lines.append("    }")
-        main_lines.append("  }")
-        main_lines.append("  return 0;")
-        main_lines.append("}")
 
-        check_path = os.path.join(tmpdir, "check.cc")
-        with open(check_path, "w") as f:
-            f.write("\n".join(main_lines))
+        main = renamed + f"""
+#include <iostream>
+#include <cstdlib>
+int main() {{
+  for (int n = 0; n <= {MAX_N}; ++n) {{
+    int a = {name}(n);
+    int b = ref_{name}(n);
+    if (a != b) {{
+      std::cout << "{name}(" << n << ") mismatch: " << a << " vs " << b << std::endl;
+      return 1;
+    }}
+  }}
+  return 0;
+}}
+"""
 
-        exe_path = os.path.join(tmpdir, "check")
-        compile_result = subprocess.run(
-            ["clang++", "-std=c++17", check_path, "-o", exe_path],
-            capture_output=True,
-            text=True,
-        )
-        if compile_result.returncode != 0:
-            print(f"Case {idx}: compilation failed for:\n{original}")
-            print(compile_result.stderr)
+        try:
+            out = cps.compile_and_run(generated, main)
+        except cps.CpsTestError as e:
+            print(f"Case {idx}: {e.stage} failed for:\n{original}")
+            if e.stderr:
+                print(e.stderr)
+            if e.stdout:
+                print(e.stdout)
             return False
 
-        run_result = subprocess.run([exe_path], capture_output=True, text=True)
-        if run_result.returncode != 0:
-            print(f"Case {idx}: runtime mismatch:\n{run_result.stdout}")
+        if out.strip():
+            print(f"Case {idx}: runtime mismatch:\n{out}")
             return False
 
     return True

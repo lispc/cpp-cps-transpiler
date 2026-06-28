@@ -38,12 +38,11 @@ bool TailRecursionRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   return true;
 }
 
-std::string TailRecursionRule::apply(const FunctionDecl *FD,
+CpsResult TailRecursionRule::apply(const FunctionDecl *FD,
                                      const BodyAnalysis &BA,
                                      GenContext &Ctx) const {
   CodeEmitter e;
-  e.raw("// === Generated tail-recursion optimized code for function: " +
-        Ctx.FuncName + " ===\n\n");
+  EmitGeneratedBanner(e, "tail-recursion optimized", Ctx.FuncName);
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   e.block(sig, [&](CodeEmitter &b) {
@@ -57,27 +56,17 @@ std::string TailRecursionRule::apply(const FunctionDecl *FD,
                  bc.ValueStr + ";");
       }
       EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
-      if (const CallExpr *RecCall = dyn_cast<CallExpr>(BA.RecExpr)) {
-        for (unsigned i = 0;
-             i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
-          std::string pName = FD->getParamDecl(i)->getNameAsString();
-          w.line("auto next_" + pName + " = " +
-                 PrintExpr(RecCall->getArg(i), Ctx.ASTCtx) + ";");
-        }
-        for (unsigned i = 0;
-             i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
-          std::string pName = FD->getParamDecl(i)->getNameAsString();
-          w.line(pName + " = next_" + pName + ";");
-        }
-      }
+      EmitTailRecParamUpdate(w, FD, dyn_cast<CallExpr>(BA.RecExpr), Ctx.ASTCtx);
     });
   });
 
   return e.str();
 }
 
-int TailRecursionRule::cost() const { return 10; }
+int TailRecursionRule::cost() const { return RuleCatalog::TailRecursion.Cost; }
 
-const char *TailRecursionRule::name() const { return "TailRecursionRule"; }
+const char *TailRecursionRule::name() const {
+  return RuleCatalog::TailRecursion.Name;
+}
 
 } // namespace cps

@@ -3,19 +3,20 @@
 Simple performance benchmark for cps-transpiler.
 
 For each benchmark case the script:
-  1. Reads the original recursive source from tests/
+  1. Reads the original recursive source from benchmarks/cases/
   2. Runs the transpiler to obtain the iterative version
   3. Builds a single executable that contains both versions
   4. Runs both and reports elapsed wall-clock time
 """
 
-import subprocess
-import sys
 import os
+import sys
 import tempfile
-import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+import cps_testlib as cps
+
 TRANSPILER = os.path.join(ROOT, "build", "cps-transpiler")
 
 CASES = [
@@ -40,30 +41,18 @@ CASES = [
 ]
 
 
-def run(cmd, **kwargs):
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-
-def transpile(input_path):
-    result = run([TRANSPILER, input_path, "--"])
-    if result.returncode != 0:
-        raise RuntimeError(f"transpiler failed: {result.stderr}")
-    lines = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("[") or stripped.startswith("// =="):
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def benchmark_case(case):
     print(f"--- Benchmark: {case['name']} ---")
 
     with open(case["input"], "r") as f:
         original = f.read()
 
-    generated = transpile(case["input"])
+    try:
+        raw = cps.run_transpiler(TRANSPILER, case["input"])
+        generated = cps.strip_diagnostic_lines(raw)
+    except cps.CpsTestError as e:
+        print(f"FAIL: transpiler failed\n{e.stderr}")
+        return False
 
     func = case["func"]
     recursive_func = func + "_recursive"
@@ -72,8 +61,7 @@ def benchmark_case(case):
     # with the transpiled version.
     renamed_original = original.replace(f"{func}(", f"{recursive_func}(")
 
-    main = f"""
-#include <chrono>
+    main = f"""#include <chrono>
 #include <iostream>
 #include <string>
 
@@ -111,35 +99,20 @@ int main() {{
 }}
 """
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".cc", delete=False
-    ) as f:
-        f.write(renamed_original)
-        f.write("\n")
-        f.write(generated)
-        f.write("\n")
-        f.write(main)
-        src_path = f.name
-
-    exe_path = src_path.replace(".cc", "")
-    compile_result = run(["clang++", "-std=c++17", "-O2", src_path, "-o", exe_path])
-    if compile_result.returncode != 0:
-        print(f"FAIL: compilation failed")
-        print(compile_result.stderr)
-        os.unlink(src_path)
+    try:
+        out = cps.compile_and_run(
+            generated,
+            main,
+            preamble=renamed_original,
+            extra_compile_args=["-O2"],
+        )
+    except cps.CpsTestError as e:
+        print(f"FAIL: {e.stage}")
+        if e.stderr:
+            print(e.stderr)
         return False
 
-    run_result = run([exe_path])
-    if run_result.returncode != 0:
-        print(f"FAIL: runtime error")
-        print(run_result.stderr)
-        os.unlink(src_path)
-        os.unlink(exe_path)
-        return False
-
-    print(run_result.stdout.strip())
-    os.unlink(src_path)
-    os.unlink(exe_path)
+    print(out.strip())
     return True
 
 

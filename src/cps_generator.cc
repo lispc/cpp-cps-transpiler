@@ -256,26 +256,50 @@ void EmitUnpacksDefun(CodeEmitter &e, const std::string &ArgName,
 
 std::string EmitFrameStruct(CodeEmitter &e, const FunctionDecl *FD,
                             const GenContext &Ctx) {
+  return EmitFrameStruct(e, FD, Ctx, {});
+}
+
+std::string EmitFrameStruct(CodeEmitter &e, const FunctionDecl *FD,
+                            const GenContext &Ctx,
+                            const std::vector<const VarDecl *> &ExtraFields) {
   std::string frameName = Ctx.FuncName + "Frame";
   e.block("struct " + frameName, [&](CodeEmitter &b) {
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
              FD->getParamDecl(i)->getNameAsString() + ";");
     }
+    for (const VarDecl *VD : ExtraFields)
+      b.line(NormalizeTypeName(VD->getType().getAsString()) + " " +
+             VD->getNameAsString() + ";");
     std::string ctor = frameName + "(";
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       if (i > 0)
         ctor += ", ";
       ctor += GetParamStorageType(FD->getParamDecl(i)) + " " +
-              FD->getParamDecl(i)->getNameAsString();
+              FD->getParamDecl(i)->getNameAsString() + "_";
     }
-    ctor += ") : ";
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (i > 0)
+    for (const VarDecl *VD : ExtraFields) {
+      if (!ctor.empty() && ctor.back() != '(')
         ctor += ", ";
-      std::string pName = FD->getParamDecl(i)->getNameAsString();
-      ctor += pName + "(" + pName + ")";
+      ctor += NormalizeTypeName(VD->getType().getAsString()) + " " +
+              VD->getNameAsString() + "_";
     }
+    ctor += ")";
+    std::string init;
+    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+      std::string p = FD->getParamDecl(i)->getNameAsString();
+      if (!init.empty())
+        init += ", ";
+      init += p + "(" + p + "_)";
+    }
+    for (const VarDecl *VD : ExtraFields) {
+      std::string n = VD->getNameAsString();
+      if (!init.empty())
+        init += ", ";
+      init += n + "(" + n + "_)";
+    }
+    if (!init.empty())
+      ctor += " : " + init;
     ctor += " {}";
     b.line(ctor);
   }, ";");
@@ -570,11 +594,11 @@ bool AnalyzeBody(const Stmt *Body, BodyAnalysis &BA,
 // Public API
 // ============================================================
 
-std::string GenerateCPS(const FunctionDecl *FD,
-                        const std::string &ForceRule,
-                        bool ExplainSelection) {
+CpsResult GenerateCPS(const FunctionDecl *FD,
+                      const std::string &ForceRule,
+                      bool ExplainSelection) {
   if (!FD || !FD->hasBody())
-    return "";
+    return MakeError(CpsErrorCode::InternalError, "invalid function decl");
 
   GenContext Ctx;
   Ctx.FuncName = FD->getNameAsString();
@@ -592,11 +616,8 @@ std::string GenerateCPS(const FunctionDecl *FD,
 
   bool isVoid = FD->getReturnType()->isVoidType();
   BodyAnalysis BA;
-  if (!AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx, Ctx.FuncName, isVoid)) {
-    errs() << "[cps-transpiler] Function body not in supported shape "
-              "(expected: leading-stmts? (if-return)* return recursive;)\n";
-    return "";
-  }
+  bool bodyAnalyzed =
+      AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx, Ctx.FuncName, isVoid);
 
   auto rules = CreateDefaultRules();
   const TransformationRule *bestRule = nullptr;
@@ -624,7 +645,14 @@ std::string GenerateCPS(const FunctionDecl *FD,
   if (bestRule)
     return bestRule->apply(FD, BA, Ctx);
 
-  return "";
+  if (!bodyAnalyzed) {
+    return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                     "function body not in supported shape "
+                     "(expected: leading-stmts? (if-return)* return recursive;)",
+                     Ctx.FuncName);
+  }
+  return MakeError(CpsErrorCode::NoApplicableRule,
+                   "no applicable transformation rule", Ctx.FuncName);
 }
 
 // ============================================================
@@ -653,16 +681,16 @@ std::string CommonPrefix(const std::vector<std::string> &Names) {
 } // anonymous namespace
 
 // Forward declaration.
-std::string GenerateMutualGenericStackCPS(
+CpsResult GenerateMutualGenericStackCPS(
     const std::vector<const FunctionDecl *> &FDs,
     const std::unordered_map<std::string, BodyAnalysis> &Analyses,
     const std::string &retType, const std::vector<std::string> &paramTypes,
     const std::vector<std::string> &paramNames);
 
-std::string GenerateMutualCPS(
+CpsResult GenerateMutualCPS(
     const std::vector<const FunctionDecl *> &FDs) {
   if (FDs.empty())
-    return "";
+    return MakeError(CpsErrorCode::InternalError, "empty mutual recursion group");
 
   const ASTContext *Ctx = &FDs[0]->getASTContext();
 
@@ -675,17 +703,31 @@ std::string GenerateMutualCPS(
         NormalizeTypeName(FDs[0]->getParamDecl(i)->getType().getAsString()));
     paramNames.push_back(FDs[0]->getParamDecl(i)->getNameAsString());
   }
+  std::string groupName = FDs[0]->getNameAsString();
+
   for (size_t f = 1; f < FDs.size(); ++f) {
     if (NormalizeTypeName(FDs[f]->getReturnType().getAsString()) != retType)
-      return "";
+      return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                       "mutual recursion group members must have identical "
+                       "return types",
+                       groupName);
     if (FDs[f]->getNumParams() != paramTypes.size())
-      return "";
+      return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                       "mutual recursion group members must have identical "
+                       "parameter counts",
+                       groupName);
     for (unsigned i = 0; i < FDs[f]->getNumParams(); ++i) {
       if (NormalizeTypeName(FDs[f]->getParamDecl(i)->getType().getAsString()) !=
           paramTypes[i])
-        return "";
+        return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                         "mutual recursion group members must have identical "
+                         "parameter types",
+                         groupName);
       if (FDs[f]->getParamDecl(i)->getNameAsString() != paramNames[i])
-        return "";
+        return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                         "mutual recursion group members must have identical "
+                         "parameter names",
+                         groupName);
     }
   }
 
@@ -695,7 +737,8 @@ std::string GenerateMutualCPS(
     BodyAnalysis BA;
     bool isVoid = FD->getReturnType()->isVoidType();
     if (!AnalyzeBody(FD->getBody(), BA, Ctx, FD->getNameAsString(), isVoid))
-      return "";
+      return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                       "function body not in supported shape", groupName);
     Analyses[FD->getNameAsString()] = BA;
   }
 
@@ -841,12 +884,13 @@ bool ContainsGroupCall(
 
 } // anonymous namespace
 
-std::string GenerateMutualGenericStackCPS(
+CpsResult GenerateMutualGenericStackCPS(
     const std::vector<const FunctionDecl *> &FDs,
     const std::unordered_map<std::string, BodyAnalysis> &Analyses,
     const std::string &retType, const std::vector<std::string> &paramTypes,
     const std::vector<std::string> &paramNames) {
   const ASTContext *Ctx = &FDs[0]->getASTContext();
+  std::string groupName = FDs[0]->getNameAsString();
 
   std::unordered_set<std::string> groupNames;
   for (const FunctionDecl *FD : FDs)
@@ -861,12 +905,16 @@ std::string GenerateMutualGenericStackCPS(
     std::vector<CallExpr *> holes;
     CollectGroupHoles(BA.RecExpr, groupNames, holes);
     if (holes.empty())
-      return "";
+      return MakeError(CpsErrorCode::NoApplicableRule,
+                       "mutual generic-stack rule found no recursive calls",
+                       groupName);
     // Reject nested group calls inside hole arguments.
     for (CallExpr *CE : holes) {
       for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
         if (ContainsGroupCall(CE->getArg(i), groupNames))
-          return "";
+          return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                           "nested mutual recursive calls are not supported",
+                           groupName);
       }
     }
     HolesByFunc[name] = holes;

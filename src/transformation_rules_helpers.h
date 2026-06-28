@@ -4,6 +4,7 @@
 #ifndef TRANSFORMATION_RULES_HELPERS_H
 #define TRANSFORMATION_RULES_HELPERS_H
 
+#include "code_emitter.h"
 #include "transformation_rule.h"
 #include <string>
 #include <unordered_set>
@@ -85,6 +86,48 @@ bool IsParamMinusConst(const clang::Expr *E, const std::string &ParamName,
 bool ContainsNonRecursiveCall(const clang::Expr *E,
                               const std::string &FuncName);
 
+// AST predicates: helpers that inspect Clang AST nodes directly instead of
+// relying on PrintExpr() + string matching.
+
+// Return the name of the callee for a call expression, or an empty string if
+// the callee cannot be determined. Handles direct calls and C++ member calls.
+std::string GetCalleeName(const clang::CallExpr *CE);
+
+// Return true if E is a call whose callee name matches Name.
+bool IsCallTo(const clang::Expr *E, const std::string &Name);
+
+// Return true if any argument of CE is a call whose callee name matches Name.
+bool AnyArgIsCallTo(const clang::CallExpr *CE, const std::string &Name);
+
+// Return true if any argument of CE is a call whose callee name starts with
+// Prefix.
+bool AnyArgIsCallToPrefix(const clang::CallExpr *CE,
+                          const std::string &Prefix);
+
+// Return true if any argument of CE is a call whose callee name is one of the
+// provided names.
+bool AnyArgIsCallToOneOf(const clang::CallExpr *CE,
+                         const std::vector<std::string> &Names);
+
+// Recursively search E for a CallExpr whose callee name matches Name.
+bool ContainsCallTo(const clang::Expr *E, const std::string &Name);
+
+// Recursively search E for a CallExpr whose callee name starts with Prefix.
+bool ContainsCallToPrefix(const clang::Expr *E, const std::string &Prefix);
+
+// Recursively search E for a CallExpr whose callee name is one of Names.
+bool ContainsCallToOneOf(const clang::Expr *E,
+                         const std::vector<std::string> &Names);
+
+// Recursively search E for a DeclRefExpr that refers to a value named Name.
+bool ContainsDeclRefNamed(const clang::Expr *E, const std::string &Name);
+
+// Return true if any argument of CE either is (or contains) a call to one of
+// CallNames, or is (or contains) a DeclRefExpr named in DeclNames.
+bool AnyArgMatches(const clang::CallExpr *CE,
+                   const std::vector<std::string> &CallNames,
+                   const std::vector<std::string> &DeclNames = {});
+
 // Condition evaluation for base-case coverage checks.
 enum class EvalResult { True, False, Unknown };
 bool ExtractParamOrLiteral(const clang::Expr *E, const std::string &ParamName,
@@ -109,6 +152,56 @@ std::vector<std::string> ParamsUsedInCode(
     const std::vector<std::string> &ParamNames);
 void EmitTargetedUnpacks(CodeEmitter &e, const std::string &ArgName,
                          const std::vector<std::string> &Params);
+
+// ============================================================
+// Shared code-generation helpers
+// ============================================================
+
+// Emit the "// === Generated <kind> code for function: <name> ===" banner.
+void EmitGeneratedBanner(CodeEmitter &e, const std::string &Kind,
+                         const std::string &FuncName);
+
+// Emit one or more #include <...> lines followed by a blank line.
+void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers);
+
+// Emit unpack statements for function parameters (and optional captured local
+// variables) from a frame/struct variable, e.g. "auto p = cur.p;".
+void EmitFrameUnpacks(CodeEmitter &e, const GenContext &Ctx,
+                      const std::vector<const clang::VarDecl *> &Locals = {},
+                      const std::string &CurName = "cur");
+
+// Emit a stack push of the form "stack.emplace_back(args);".
+void EmitStackPush(CodeEmitter &e, const std::string &Args);
+
+// Emit the standard explicit-stack loop body. The caller is responsible for
+// declaring the std::vector<FrameType> stack and pushing the initial frame.
+// The body callback receives the CodeEmitter for the loop body, after
+// "auto cur = stack.back(); stack.pop_back();" has already been emitted.
+template <typename BodyFn>
+void EmitExplicitStackLoop(CodeEmitter &e, const std::string &FrameType,
+                           BodyFn &&body);
+
+// Emit the tail-recursion parameter update pattern:
+//   auto next_p = <arg>;
+//   p = next_p;
+void EmitTailRecParamUpdate(CodeEmitter &e, const clang::FunctionDecl *FD,
+                            const clang::CallExpr *RecCall,
+                            const clang::ASTContext *Ctx);
+
+// ============================================================
+// Template implementations
+// ============================================================
+
+template <typename BodyFn>
+void EmitExplicitStackLoop(CodeEmitter &e, const std::string &FrameType,
+                           BodyFn &&body) {
+  (void)FrameType;
+  e.block("while (!stack.empty())", [&](CodeEmitter &w) {
+    w.line("auto cur = stack.back();");
+    w.line("stack.pop_back();");
+    body(w);
+  });
+}
 
 } // namespace cps
 

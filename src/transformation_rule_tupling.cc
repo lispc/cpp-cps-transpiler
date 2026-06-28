@@ -69,7 +69,7 @@ bool TuplingRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   return true;
 }
 
-std::string TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
+CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
                                GenContext &Ctx) const {
   std::string pName = Ctx.ParamNames[0];
   std::string pType = GetParamStorageType(FD->getParamDecl(0));
@@ -134,8 +134,8 @@ std::string TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   return e.str();
 }
 
-int TuplingRule::cost() const { return 30; }
+int TuplingRule::cost() const { return RuleCatalog::Tupling.Cost; }
 
-const char *TuplingRule::name() const { return "TuplingRule"; }
+const char *TuplingRule::name() const { return RuleCatalog::Tupling.Name; }
 
 } // namespace cps
