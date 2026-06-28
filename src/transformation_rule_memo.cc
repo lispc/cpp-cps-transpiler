@@ -98,14 +98,20 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
   e.nl();
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
+  const ParmVarDecl *Param = FD->getParamDecl(0);
+
   e.block(sig, [&](CodeEmitter &b) {
     // Early base-case return for small inputs.
     b.block("if (" + pName + " <= " + std::to_string(maxOffset - 1) + ")",
             [&](CodeEmitter &iw) {
               for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
                 std::string prefix = (bi == 0) ? "if (" : "else if (";
-                iw.line(prefix + BA.BaseCases[bi].CondStr + ") return " +
-                        BA.BaseCases[bi].ValueStr + ";");
+                const auto &bc = BA.BaseCases[bi];
+                std::string condStr =
+                    bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
+                std::string valStr =
+                    bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+                iw.line(prefix + condStr + ") return " + valStr + ";");
               }
               iw.line("return 0;");
             });
@@ -116,9 +122,9 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
       for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
         if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, i) ==
             EvalResult::True) {
-          std::string baseExpr =
-              ReplaceParamWithLiteral(BA.BaseCases[bi].ValueStr, pName,
-                                      std::to_string(i));
+          std::string baseExpr = ReplaceParamWithLiteral(
+              BA.BaseCases[bi].ValueExpr, Param, std::to_string(i),
+              Ctx.ASTCtx);
           b.line("dp[" + std::to_string(i) + "] = " + baseExpr + ";");
           break;
         }

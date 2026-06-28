@@ -1,3 +1,9 @@
+Error while trying to load a compilation database:
+Could not auto-detect compilation database for file "tests/test_input_impure_base.cc"
+No compilation database found in /Users/zhangzhuo/repos/personal/cps/tests or any parent directory
+fixed-compilation-database: Error while opening fixed database: No such file or directory
+json-compilation-database: Error while opening JSON database: No such file or directory
+Running without flags.
 [Detected recursive function] impure_base
 
 // ================================
@@ -7,46 +13,46 @@
 // === Generated generic-stack code for function: impure_base ===
 
 #include <vector>
-#include <variant>
 
-struct impure_baseFrame {
+struct __cps_impure_baseFrame {
   int n;
-  impure_baseFrame(int n) : n(n) {}
+  __cps_impure_baseFrame(int n_) : n(n_) {}
 };
 
-struct impure_baseCombineMarker {
+struct __cps_impure_baseEntry {
+  enum class Tag { Frame, Marker } tag;
+  __cps_impure_baseFrame frame;
   int count;
-  impure_baseFrame frame;
-  impure_baseCombineMarker(int c, impure_baseFrame f) : count(c), frame(std::move(f)) {}
+  __cps_impure_baseEntry(__cps_impure_baseFrame f) : tag(Tag::Frame), frame(std::move(f)), count(0) {}
+  __cps_impure_baseEntry(int c, __cps_impure_baseFrame f) : tag(Tag::Marker), frame(std::move(f)), count(c) {}
 };
 
 int impure_base(int n) {
-  std::vector<std::variant<impure_baseFrame, impure_baseCombineMarker>> stack;
-  stack.emplace_back(impure_baseFrame(n));
-  std::vector<int> values;
-  while (!stack.empty()) {
-    auto entry = stack.back();
-    stack.pop_back();
-    if (std::holds_alternative<impure_baseCombineMarker>(entry)) {
-      auto marker = std::get<impure_baseCombineMarker>(entry);
-      auto cur = marker.frame;
-      auto n = cur.n;
-      int v0 = values.back();
-      values.pop_back();
-      values.push_back((v0 + n));
+  std::vector<__cps_impure_baseEntry> __cps_stack;
+  std::vector<int> __cps_values;
+  __cps_stack.emplace_back(__cps_impure_baseFrame(n));
+  while (!__cps_stack.empty()) {
+    auto __cps_entry = __cps_stack.back();
+    __cps_stack.pop_back();
+    if (__cps_entry.tag == __cps_impure_baseEntry::Tag::Marker) {
+      auto __cps_cur = __cps_entry.frame;
+      auto n = __cps_cur.n;
+      int v0 = __cps_values.back();
+      __cps_values.pop_back();
+      __cps_values.push_back(v0 + n);
     }
     else {
-      auto cur = std::get<impure_baseFrame>(entry);
-      auto n = cur.n;
+      auto __cps_cur = __cps_entry.frame;
+      auto n = __cps_cur.n;
       if (n <= 1)
-        values.push_back(++counter);
+        __cps_values.push_back(++counter);
       else {
-        stack.emplace_back(impure_baseCombineMarker(1, cur));
-        stack.emplace_back(impure_baseFrame(n - 1));
+        __cps_stack.emplace_back(__cps_impure_baseEntry(1, __cps_impure_baseFrame(n)));
+        __cps_stack.emplace_back(__cps_impure_baseFrame(n - 1));
       }
     }
   }
-  return values.back();
+  return __cps_values.back();
 }
 
 

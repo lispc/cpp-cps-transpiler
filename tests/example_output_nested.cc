@@ -1,3 +1,9 @@
+Error while trying to load a compilation database:
+Could not auto-detect compilation database for file "tests/test_input_nested.cc"
+No compilation database found in /Users/zhangzhuo/repos/personal/cps/tests or any parent directory
+fixed-compilation-database: Error while opening fixed database: No such file or directory
+json-compilation-database: Error while opening JSON database: No such file or directory
+Running without flags.
 [Detected recursive function] nested_fact
 
 // ================================
@@ -54,14 +60,11 @@ int nested_fact(int n) {
       case nested_factCont::Done:
         return val;
       case nested_factCont::K0: {
-        auto n = f.saved_arg.n;
         k.emplace_back(nested_factCont::K1, std::vector<int>{val}, f.saved_arg);
         arg = nested_factArg(val);
         goto dispatch;
       }
       case nested_factCont::K1: {
-        auto n = f.saved_arg.n;
-        val = val;
         break;
       }
       }

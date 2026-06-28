@@ -172,7 +172,7 @@ int f(int n) {
 | 2 | **AccumulatorRule** | 单递归调用与可结合运算组合 | `while` + 累加器/累乘器 | `n * fact(n-1)` |
 | 3 | **TuplingRule** | k 阶线性齐次递推 | O(n) 数组/元组循环 | `fib(n)=fib(n-1)+fib(n-2)` |
 | 4 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
-| 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接 | 显式帧栈 | `fib(n-1)+fib(n-2)` |
+| 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接（`&&`/`\|\|` 因短路语义不在这里处理） | 显式帧栈 | `fib(n-1)+fib(n-2)` |
 | 6 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
 | 7 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归；支持 boolean any/all 与指针 find-first | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
 | 8 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |

@@ -74,3 +74,8 @@ contains_call_to_prefix
 contains_call_to_one_of
 contains_decl_ref_named
 find_direct_recursive_call_in_expr
+mutual_rename
+mutual_nontail_rename
+generic_captured_class
+defun_double_return
+short_circuit_and

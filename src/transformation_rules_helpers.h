@@ -95,8 +95,18 @@ bool IsPureExprIgnoringRecursiveCalls(const clang::Expr *E,
                                       const std::string &FuncName);
 
 // Parameter usage.
-bool ExprUsesParams(const clang::Expr *E,
-                    const std::unordered_set<std::string> &ParamNames);
+bool ExprUsesParams(
+    const clang::Expr *E,
+    const std::unordered_set<const clang::ValueDecl *> &ParamDecls);
+
+// Check whether an expression contains a reference to a specific ValueDecl.
+bool ExprContainsDeclRef(const clang::Expr *E,
+                         const clang::ValueDecl *VD);
+
+// Check whether E contains a reference to VD outside of any of the given holes.
+bool ExprContainsDeclRefOutsideHoles(
+    const clang::Expr *E, const clang::ValueDecl *VD,
+    const std::vector<clang::CallExpr *> &Holes);
 
 // Argument shape checks.
 bool IsParamMinusConst(const clang::Expr *E, const std::string &ParamName,
@@ -107,6 +117,11 @@ bool ContainsNonRecursiveCall(const clang::Expr *E,
 // Type-string helpers (loose matching for shape detection).
 std::string TypeString(const clang::ParmVarDecl *PVD);
 bool TypeContains(const std::string &T, const std::string &Pattern);
+
+// Return a default-initializer literal suitable for a placeholder of the given
+// type.  Used when stack frames need a dummy value for locals that will be
+// initialized later by the loop body.
+std::string GetDefaultValueForType(const clang::QualType &QT);
 
 // AST predicates: helpers that inspect Clang AST nodes directly instead of
 // relying on PrintExpr() + string matching.
@@ -186,44 +201,12 @@ void EmitGeneratedBanner(CodeEmitter &e, const std::string &Kind,
 // Emit one or more #include <...> lines followed by a blank line.
 void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers);
 
-// Emit unpack statements for function parameters (and optional captured local
-// variables) from a frame/struct variable, e.g. "auto p = cur.p;".
-void EmitFrameUnpacks(CodeEmitter &e, const GenContext &Ctx,
-                      const std::vector<const clang::VarDecl *> &Locals = {},
-                      const std::string &CurName = "cur");
-
-// Emit a stack push of the form "stack.emplace_back(args);".
-void EmitStackPush(CodeEmitter &e, const std::string &Args);
-
-// Emit the standard explicit-stack loop body. The caller is responsible for
-// declaring the std::vector<FrameType> stack and pushing the initial frame.
-// The body callback receives the CodeEmitter for the loop body, after
-// "auto cur = stack.back(); stack.pop_back();" has already been emitted.
-template <typename BodyFn>
-void EmitExplicitStackLoop(CodeEmitter &e, const std::string &FrameType,
-                           BodyFn &&body);
-
 // Emit the tail-recursion parameter update pattern:
 //   auto next_p = <arg>;
 //   p = next_p;
 void EmitTailRecParamUpdate(CodeEmitter &e, const clang::FunctionDecl *FD,
                             const clang::CallExpr *RecCall,
                             const clang::ASTContext *Ctx);
-
-// ============================================================
-// Template implementations
-// ============================================================
-
-template <typename BodyFn>
-void EmitExplicitStackLoop(CodeEmitter &e, const std::string &FrameType,
-                           BodyFn &&body) {
-  (void)FrameType;
-  e.block("while (!stack.empty())", [&](CodeEmitter &w) {
-    w.line("auto cur = stack.back();");
-    w.line("stack.pop_back();");
-    body(w);
-  });
-}
 
 } // namespace cps
 

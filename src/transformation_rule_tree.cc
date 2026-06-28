@@ -114,16 +114,19 @@ const Stmt *FindDirectChildStmtContainingCall(const Stmt *Root,
 // Replace literal boolean returns with a values-stack push + continue.
 // Used for boolean all/any tree traversals so that base cases contribute a
 // value instead of returning from the explicit stack loop.
-std::string ReplaceLiteralReturns(const std::string &S) {
+std::string ReplaceLiteralReturns(const std::string &S,
+                                  const std::string &ValuesVar) {
   std::string r = S;
   size_t pos = 0;
-  const std::string falseRepl = "{ values.push_back(false); continue; }";
+  const std::string falseRepl =
+      "{ " + ValuesVar + ".push_back(false); continue; }";
   while ((pos = r.find("return false;", pos)) != std::string::npos) {
     r.replace(pos, 13, falseRepl);
     pos += falseRepl.size();
   }
   pos = 0;
-  const std::string trueRepl = "{ values.push_back(true); continue; }";
+  const std::string trueRepl =
+      "{ " + ValuesVar + ".push_back(true); continue; }";
   while ((pos = r.find("return true;", pos)) != std::string::npos) {
     r.replace(pos, 12, trueRepl);
     pos += trueRepl.size();
@@ -441,7 +444,10 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     return txt;
   };
 
-  std::string frameName = Ctx.FuncName + "Frame";
+  std::string frameName = "__cps_" + Ctx.FuncName + "Frame";
+  std::string stackName = "__cps_stack";
+  std::string valuesName = "__cps_values";
+  std::string curName = "__cps_cur";
 
   CodeEmitter e;
   e.raw("// === Generated tree-traversal code for function: " + Ctx.FuncName +
@@ -522,12 +528,12 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     }
 
     // Initialize stack with the original arguments.
-    b.line("std::vector<" + frameName + "> stack;");
+    b.line("std::vector<" + frameName + "> " + stackName + ";");
     if (IsBoolAllAny)
-      b.line("std::vector<bool> values;");
+      b.line("std::vector<bool> " + valuesName + ";");
     if (IsFindFirst)
-      b.line("std::vector<" + Ctx.RetType + "> values;");
-    std::string push0 = "stack.emplace_back(" + frameName + "(";
+      b.line("std::vector<" + Ctx.RetType + "> " + valuesName + ";");
+    std::string push0 = stackName + ".emplace_back(" + frameName + "(";
     bool firstPush = true;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       if (IsOutRef[i])
@@ -540,38 +546,38 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     push0 += "));";
     b.line(push0);
 
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("auto cur = stack.back();");
-      w.line("stack.pop_back();");
+    b.block("while (!" + stackName + ".empty())", [&](CodeEmitter &w) {
+      w.line("auto " + curName + " = " + stackName + ".back();");
+      w.line(stackName + ".pop_back();");
       for (unsigned i = 0; i < FD->getNumParams(); ++i) {
         if (IsOutRef[i])
           continue;
-        w.line("auto " + FD->getParamDecl(i)->getNameAsString() + " = cur." +
+        w.line("auto " + FD->getParamDecl(i)->getNameAsString() + " = " + curName + "." +
                FD->getParamDecl(i)->getNameAsString() + ";");
       }
 
       if (IsBoolAllAny) {
-        w.block("if (cur.is_marker)", [&](CodeEmitter &mw) {
-          mw.line("bool res = cur.marker_and ? true : false;");
-          mw.block("for (std::size_t i = 0; i < cur.marker_count; ++i)",
+        w.block("if (" + curName + ".is_marker)", [&](CodeEmitter &mw) {
+          mw.line("bool res = " + curName + ".marker_and ? true : false;");
+          mw.block("for (std::size_t i = 0; i < " + curName + ".marker_count; ++i)",
                    [&](CodeEmitter &fw) {
-                     fw.line("bool v = values.back(); values.pop_back();");
-                     fw.line("res = cur.marker_and ? (res && v) : (res || v);");
+                     fw.line("bool v = " + valuesName + ".back(); " + valuesName + ".pop_back();");
+                     fw.line("res = " + curName + ".marker_and ? (res && v) : (res || v);");
                    });
-          mw.line("values.push_back(res);");
+          mw.line(valuesName + ".push_back(res);");
           mw.line("continue;");
         });
       }
 
       if (IsFindFirst) {
-        w.block("if (cur.is_marker)", [&](CodeEmitter &mw) {
+        w.block("if (" + curName + ".is_marker)", [&](CodeEmitter &mw) {
           mw.line(Ctx.RetType + " res = nullptr;");
-          mw.block("for (std::size_t i = 0; i < cur.marker_count; ++i)",
+          mw.block("for (std::size_t i = 0; i < " + curName + ".marker_count; ++i)",
                    [&](CodeEmitter &fw) {
-                     fw.line(Ctx.RetType + " v = values.back(); values.pop_back();");
+                     fw.line(Ctx.RetType + " v = " + valuesName + ".back(); " + valuesName + ".pop_back();");
                      fw.line("if (v) res = v;");
                    });
-          mw.line("values.push_back(res);");
+          mw.line(valuesName + ".push_back(res);");
           mw.line("continue;");
         });
       }
@@ -636,7 +642,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
             if (!txt.empty()) {
               txt = EnsureSemicolon(txt);
               txt = applyPreLoopReplacements(txt);
-              txt = ReplaceReturnsWithValuePush(txt, "values");
+              txt = ReplaceReturnsWithValuePush(txt, valuesName);
               target.raw(Indent(txt, target.current_indent() * 2) + "\n");
             }
           }
@@ -662,7 +668,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       };
 
       if (HasPostLoop) {
-        w.block("if (cur.done)", [&](CodeEmitter &dw) {
+        w.block("if (" + curName + ".done)", [&](CodeEmitter &dw) {
           for (const Stmt *S : PostLoopStmts) {
             std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
             if (!txt.empty()) {
@@ -675,10 +681,10 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
           emitBaseCases(ew, false);
 
           std::string pushStr =
-              "stack.emplace_back(" + frameName + "(" +
+              stackName + ".emplace_back(" + frameName + "(" +
               buildFrameCtorArgs(RecCall) + "));";
           std::string markerStr =
-              "stack.emplace_back(" + frameName + "(" +
+              stackName + ".emplace_back(" + frameName + "(" +
               buildFrameCtorArgsFromParams() + ", true));";
 
           const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
@@ -701,7 +707,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
             // Marker is pushed with current parameters, not recursive-call
             // arguments; reuse the current parameter names.
             std::string markerStrNonRange =
-                "stack.emplace_back(" + frameName + "(" +
+                stackName + ".emplace_back(" + frameName + "(" +
                 buildFrameCtorArgsFromParams() + ", true));";
             ew.line(markerStrNonRange);
             std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
@@ -767,7 +773,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
               continue;
             txt = EnsureSemicolon(txt);
             txt = applyPreLoopReplacements(txt);
-            txt = ReplaceLiteralReturns(txt);
+            txt = ReplaceLiteralReturns(txt, valuesName);
             w.raw(Indent(txt, w.current_indent() * 2) + "\n");
           }
 
@@ -779,11 +785,11 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
           std::string loopVarSrc = StripTrailingColon(
               GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
           std::string emptyValue = IsAnd ? "true" : "false";
-          std::string markerPush = "stack.emplace_back(" + frameName + "(" +
+          std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
                                    buildFrameCtorArgsFromParams() +
                                    ", false, true, __cps_n, " + emptyValue +
                                    "));";
-          std::string childPush = "stack.emplace_back(" + frameName + "(" +
+          std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
                                   buildFrameCtorArgs(RecCall) + "));";
           w.block("", [&](CodeEmitter &rb) {
             rb.line("auto &&__cps_range = " + rangeSrc + ";");
@@ -792,7 +798,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                      "__cps_range.end(); ++__cps_it)",
                      [&](CodeEmitter &cb) { cb.line("++__cps_n;"); });
             rb.block("if (__cps_n == 0)", [&](CodeEmitter &eb) {
-              eb.line("values.push_back(" + emptyValue + ");");
+              eb.line(valuesName + ".push_back(" + emptyValue + ");");
               eb.line("continue;");
             });
             rb.line(markerPush);
@@ -815,10 +821,10 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
               GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
           std::string loopVarSrc = StripTrailingColon(
               GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-          std::string markerPush = "stack.emplace_back(" + frameName + "(" +
+          std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
                                    buildFrameCtorArgsFromParams() +
                                    ", false, true, __cps_n));";
-          std::string childPush = "stack.emplace_back(" + frameName + "(" +
+          std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
                                   buildFrameCtorArgs(RecCall) + "));";
           w.block("", [&](CodeEmitter &rb) {
             rb.line("auto &&__cps_range = " + rangeSrc + ";");
@@ -827,7 +833,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                      "__cps_range.end(); ++__cps_it)",
                      [&](CodeEmitter &cb) { cb.line("++__cps_n;"); });
             rb.block("if (__cps_n == 0)", [&](CodeEmitter &eb) {
-              eb.line("values.push_back(nullptr);");
+              eb.line(valuesName + ".push_back(nullptr);");
               eb.line("continue;");
             });
             rb.line(markerPush);
@@ -845,7 +851,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
           // Emit the loop. For range-based for loops we rewrite to reverse
           // iteration so that children are processed in original DFS order on
           // the explicit stack.
-          std::string pushStr = "stack.emplace_back(" + frameName + "(" +
+          std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
                                 buildFrameCtorArgs(RecCall) + "));";
           const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
           if (ForRange) {
@@ -909,13 +915,13 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     }
     if (IsBoolAllAny) {
       std::string emptyValue = IsAnd ? "true" : "false";
-      b.line("return values.empty() ? " + emptyValue + " : values.back();");
+      b.line("return " + valuesName + ".empty() ? " + emptyValue + " : " + valuesName + ".back();");
     } else if (IsFindFirst) {
       std::string defaultExpr = "nullptr";
       if (FinalRet && FinalRet->getRetValue())
         defaultExpr = StripOuterParens(
             PrintExpr(FinalRet->getRetValue(), Ctx.ASTCtx));
-      b.line("return values.empty() ? " + defaultExpr + " : values.back();");
+      b.line("return " + valuesName + ".empty() ? " + defaultExpr + " : " + valuesName + ".back();");
     } else {
       if (FinalRet && !IsVoid) {
         std::string txt = NormalizeIndentation(PrintStmt(FinalRet, Ctx.ASTCtx));

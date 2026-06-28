@@ -1,37 +1,32 @@
+Error while trying to load a compilation database:
+Could not auto-detect compilation database for file "tests/test_input_xor_tree.cc"
+No compilation database found in /Users/zhangzhuo/repos/personal/cps/tests or any parent directory
+fixed-compilation-database: Error while opening fixed database: No such file or directory
+json-compilation-database: Error while opening JSON database: No such file or directory
+Running without flags.
 [Detected recursive function] xor_tree
 
 // ================================
 // Generated iterative code
 // ================================
 
-// === Generated binary-stack code for function: xor_tree ===
+// === Generated memoized code for function: xor_tree ===
 
 #include <vector>
 
-struct xor_treeFrame {
-  int n;
-  xor_treeFrame(int n) : n(n) {}
-};
-
 int xor_tree(int n) {
-  std::vector<xor_treeFrame> stack;
-  stack.emplace_back(n);
-  int result = 0;
-  while (!stack.empty()) {
-    auto cur = stack.back();
-    stack.pop_back();
-    if (cur.n <= 0) {
-      result ^= 0;
-    }
-    else if (cur.n == 1) {
-      result ^= 1;
-    }
-    else {
-      stack.emplace_back(cur.n - 2);
-      stack.emplace_back(cur.n - 1);
-    }
+  if (n <= 1) {
+    if (n <= 0) return 0;
+    else if (n == 1) return 1;
+    return 0;
   }
-  return result;
+  std::vector<int> dp(n + 1);
+  dp[0] = 0;
+  dp[1] = 1;
+  for (int i = 2; i <= n; ++i) {
+    dp[i] = dp[i - 1] ^ dp[i - 2];
+  }
+  return dp[n];
 }
 
 

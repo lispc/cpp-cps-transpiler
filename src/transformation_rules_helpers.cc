@@ -322,6 +322,19 @@ bool TypeContains(const std::string &T, const std::string &Pattern) {
   return normalized.find(Pattern) != std::string::npos;
 }
 
+std::string GetDefaultValueForType(const QualType &QT) {
+  if (QT->isPointerType() || QT->isReferenceType())
+    return "nullptr";
+  if (QT->isBooleanType())
+    return "false";
+  if (QT->isIntegerType())
+    return "0";
+  if (QT->isFloatingType())
+    return "0.0";
+  // Class types and other value types: use value-initialization.
+  return NormalizeTypeName(QT.getAsString()) + "{}";
+}
+
 bool IsLoopStmt(const Stmt *S) {
   return isa<ForStmt>(S) || isa<CXXForRangeStmt>(S);
 }
@@ -712,18 +725,55 @@ bool IsParamMinusConst(const Expr *E, const std::string &ParamName,
 // Parameter usage
 // ============================================================
 
-bool ExprUsesParams(const Expr *E,
-                    const std::unordered_set<std::string> &ParamNames) {
+bool ExprUsesParams(
+    const Expr *E,
+    const std::unordered_set<const ValueDecl *> &ParamDecls) {
   if (!E)
     return false;
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
     if (const ValueDecl *VD = DRE->getDecl()) {
-      if (ParamNames.count(VD->getNameAsString()))
+      if (ParamDecls.count(VD))
         return true;
     }
   }
   for (const Stmt *Child : E->children()) {
-    if (ExprUsesParams(dyn_cast_or_null<Expr>(Child), ParamNames))
+    if (ExprUsesParams(dyn_cast_or_null<Expr>(Child), ParamDecls))
+      return true;
+  }
+  return false;
+}
+
+bool ExprContainsDeclRef(const Expr *E, const ValueDecl *VD) {
+  if (!E)
+    return false;
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+    if (DRE->getDecl() == VD)
+      return true;
+  }
+  for (const Stmt *Child : E->children()) {
+    if (ExprContainsDeclRef(dyn_cast_or_null<Expr>(Child), VD))
+      return true;
+  }
+  return false;
+}
+
+bool ExprContainsDeclRefOutsideHoles(
+    const Expr *E, const ValueDecl *VD,
+    const std::vector<CallExpr *> &Holes) {
+  if (!E)
+    return false;
+  // If this node is a hole, do not descend: its arguments will be replaced.
+  for (CallExpr *Hole : Holes) {
+    if (E == Hole)
+      return false;
+  }
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+    if (DRE->getDecl() == VD)
+      return true;
+  }
+  for (const Stmt *Child : E->children()) {
+    if (ExprContainsDeclRefOutsideHoles(dyn_cast_or_null<Expr>(Child), VD,
+                                        Holes))
       return true;
   }
   return false;
@@ -1195,20 +1245,6 @@ void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers) {
     e.line("#include <" + h + ">");
   if (!Headers.empty())
     e.nl();
-}
-
-void EmitFrameUnpacks(CodeEmitter &e, const GenContext &Ctx,
-                      const std::vector<const VarDecl *> &Locals,
-                      const std::string &CurName) {
-  for (const auto &p : Ctx.ParamNames)
-    e.line("auto " + p + " = " + CurName + "." + p + ";");
-  for (const VarDecl *VD : Locals)
-    e.line("auto " + VD->getNameAsString() + " = " + CurName + "." +
-           VD->getNameAsString() + ";");
-}
-
-void EmitStackPush(CodeEmitter &e, const std::string &Args) {
-  e.line("stack.emplace_back(" + Args + ");");
 }
 
 void EmitTailRecParamUpdate(CodeEmitter &e, const FunctionDecl *FD,

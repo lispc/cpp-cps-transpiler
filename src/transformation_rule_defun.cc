@@ -127,7 +127,7 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   for (size_t i = 0; i < holes.size(); ++i) {
     closures.push_back(
         {"K" + std::to_string(i),
-         NeedsSavedArg(RecExpr, holes, i, Ctx.ParamNameSet)});
+         NeedsSavedArg(RecExpr, holes, i, Ctx.ParamDeclSet)});
   }
 
   {
@@ -243,15 +243,19 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   e.block(sig, [&](CodeEmitter &b) {
     b.line("std::vector<" + Ctx.FuncName + "Frame> k;");
     b.line("k.emplace_back(" + Ctx.FuncName + "Cont::Done);");
-    b.line(Ctx.ArgType + " arg = " +
-           ArgCtorDefun(std::vector<std::string>(Ctx.ParamNames.size(), "0"),
-                        Ctx) +
-           ";");
+    {
+      std::vector<std::string> argDefaults;
+      for (unsigned i = 0; i < FD->getNumParams(); ++i)
+        argDefaults.push_back(
+            GetDefaultValueForType(FD->getParamDecl(i)->getType()));
+      b.line(Ctx.ArgType + " arg = " + ArgCtorDefun(argDefaults, Ctx) + ";");
+    }
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       b.line("arg." + Ctx.ParamNames[i] + " = " +
              FD->getParamDecl(i)->getNameAsString() + ";");
     }
-    b.line(Ctx.RetType + " val = 0;");
+    b.line(Ctx.RetType + " val = " +
+           GetDefaultValueForType(FD->getReturnType()) + ";");
     b.line("dispatch:");
     b.block("while (1)", [&](CodeEmitter &w) {
       EmitUnpacksDefun(w, "arg", Ctx);

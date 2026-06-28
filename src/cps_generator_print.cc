@@ -1,15 +1,20 @@
 #include "cps_generator.h"
 #include "clang/AST/AST.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cctype>
 #include <string>
+#include <unordered_map>
 
 using namespace clang;
 using namespace llvm;
 
 namespace cps {
+
+// Forward declarations for helpers used inside the anonymous namespace.
+std::string PrintExpr(const Expr *E, const ASTContext *Ctx);
 
 namespace {
 
@@ -23,7 +28,118 @@ std::string Trim(const std::string &S) {
   return S.substr(a, b - a);
 }
 
-} // anonymous namespace
+// Common implementation for expression printing with optional Expr-level and
+// Decl-level replacements.
+std::string PrintExprWithReplacementsImpl(
+    const Expr *E,
+    const std::unordered_map<const Expr *, std::string> *ExprRepls,
+    const std::unordered_map<const ValueDecl *, std::string> *DeclRepls,
+    const ASTContext *Ctx) {
+  if (!E)
+    return "";
+
+  if (ExprRepls) {
+    auto It = ExprRepls->find(E);
+    if (It != ExprRepls->end())
+      return It->second;
+  }
+
+  if (DeclRepls) {
+    if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+      auto It = DeclRepls->find(DRE->getDecl());
+      if (It != DeclRepls->end())
+        return It->second;
+    }
+  }
+
+  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+    return "(" +
+           PrintExprWithReplacementsImpl(BO->getLHS(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           " " + BO->getOpcodeStr().str() + " " +
+           PrintExprWithReplacementsImpl(BO->getRHS(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           ")";
+  }
+
+  if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
+    std::string op = UO->getOpcodeStr(UO->getOpcode()).str();
+    std::string sub = PrintExprWithReplacementsImpl(UO->getSubExpr(), ExprRepls,
+                                                    DeclRepls, Ctx);
+    if (!UO->isPostfix())
+      return op + "(" + sub + ")";
+    return "(" + sub + ")" + op;
+  }
+
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+    std::string s;
+    if (const Expr *Callee = CE->getCallee()) {
+      s += PrintExprWithReplacementsImpl(Callee, ExprRepls, DeclRepls, Ctx);
+    }
+    s += "(";
+    for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+      if (i > 0)
+        s += ", ";
+      s += PrintExprWithReplacementsImpl(CE->getArg(i), ExprRepls, DeclRepls,
+                                         Ctx);
+    }
+    s += ")";
+    return s;
+  }
+
+  if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
+    return "(" +
+           PrintExprWithReplacementsImpl(CO->getCond(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           " ? " +
+           PrintExprWithReplacementsImpl(CO->getTrueExpr(), ExprRepls,
+                                         DeclRepls, Ctx) +
+           " : " +
+           PrintExprWithReplacementsImpl(CO->getFalseExpr(), ExprRepls,
+                                         DeclRepls, Ctx) +
+           ")";
+  }
+
+  if (const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
+    return PrintExprWithReplacementsImpl(ASE->getBase(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           "[" +
+           PrintExprWithReplacementsImpl(ASE->getIdx(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           "]";
+  }
+
+  if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
+    return PrintExprWithReplacementsImpl(ME->getBase(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           (ME->isArrow() ? "->" : ".") +
+           ME->getMemberNameInfo().getAsString();
+  }
+
+  if (const ParenExpr *PE = dyn_cast<ParenExpr>(E)) {
+    return "(" +
+           PrintExprWithReplacementsImpl(PE->getSubExpr(), ExprRepls, DeclRepls,
+                                         Ctx) +
+           ")";
+  }
+
+  if (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
+    return PrintExprWithReplacementsImpl(ICE->getSubExpr(), ExprRepls,
+                                         DeclRepls, Ctx);
+  }
+
+  if (const CStyleCastExpr *CCE = dyn_cast<CStyleCastExpr>(E)) {
+    return "(" + CCE->getTypeAsWritten().getAsString() + ")" +
+           "(" +
+           PrintExprWithReplacementsImpl(CCE->getSubExpr(), ExprRepls,
+                                         DeclRepls, Ctx) +
+           ")";
+  }
+
+  return PrintExpr(E, Ctx);
+}
+
+} // namespace
 
 std::string PrintExpr(const Expr *E, const ASTContext *Ctx) {
   std::string s;
@@ -70,73 +186,22 @@ std::string PrintExprWithReplacements(
     const Expr *E,
     const std::unordered_map<const Expr *, std::string> &Repls,
     const ASTContext *Ctx) {
-  if (!E)
-    return "";
+  return PrintExprWithReplacementsImpl(E, &Repls, nullptr, Ctx);
+}
 
-  auto It = Repls.find(E);
-  if (It != Repls.end())
-    return It->second;
+std::string PrintExprWithDeclReplacements(
+    const Expr *E,
+    const std::unordered_map<const ValueDecl *, std::string> &DeclRepls,
+    const ASTContext *Ctx) {
+  return PrintExprWithReplacementsImpl(E, nullptr, &DeclRepls, Ctx);
+}
 
-  if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
-    return "(" + PrintExprWithReplacements(BO->getLHS(), Repls, Ctx) + " " +
-           BO->getOpcodeStr().str() + " " +
-           PrintExprWithReplacements(BO->getRHS(), Repls, Ctx) + ")";
-  }
-
-  if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(E)) {
-    std::string op = UO->getOpcodeStr(UO->getOpcode()).str();
-    std::string sub = PrintExprWithReplacements(UO->getSubExpr(), Repls, Ctx);
-    if (!UO->isPostfix())
-      return op + "(" + sub + ")";
-    return "(" + sub + ")" + op;
-  }
-
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
-    std::string s;
-    if (const Expr *Callee = CE->getCallee()) {
-      s += PrintExprWithReplacements(Callee, Repls, Ctx);
-    }
-    s += "(";
-    for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
-      if (i > 0)
-        s += ", ";
-      s += PrintExprWithReplacements(CE->getArg(i), Repls, Ctx);
-    }
-    s += ")";
-    return s;
-  }
-
-  if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
-    return "(" + PrintExprWithReplacements(CO->getCond(), Repls, Ctx) + " ? " +
-           PrintExprWithReplacements(CO->getTrueExpr(), Repls, Ctx) + " : " +
-           PrintExprWithReplacements(CO->getFalseExpr(), Repls, Ctx) + ")";
-  }
-
-  if (const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(E)) {
-    return PrintExprWithReplacements(ASE->getBase(), Repls, Ctx) + "[" +
-           PrintExprWithReplacements(ASE->getIdx(), Repls, Ctx) + "]";
-  }
-
-  if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
-    return PrintExprWithReplacements(ME->getBase(), Repls, Ctx) +
-           (ME->isArrow() ? "->" : ".") +
-           ME->getMemberNameInfo().getAsString();
-  }
-
-  if (const ParenExpr *PE = dyn_cast<ParenExpr>(E)) {
-    return "(" + PrintExprWithReplacements(PE->getSubExpr(), Repls, Ctx) + ")";
-  }
-
-  if (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
-    return PrintExprWithReplacements(ICE->getSubExpr(), Repls, Ctx);
-  }
-
-  if (const CStyleCastExpr *CCE = dyn_cast<CStyleCastExpr>(E)) {
-    return "(" + CCE->getTypeAsWritten().getAsString() + ")" +
-           "(" + PrintExprWithReplacements(CCE->getSubExpr(), Repls, Ctx) + ")";
-  }
-
-  return PrintExpr(E, Ctx);
+std::string PrintExprWithReplacements(
+    const Expr *E,
+    const std::unordered_map<const Expr *, std::string> &ExprRepls,
+    const std::unordered_map<const ValueDecl *, std::string> &DeclRepls,
+    const ASTContext *Ctx) {
+  return PrintExprWithReplacementsImpl(E, &ExprRepls, &DeclRepls, Ctx);
 }
 
 } // namespace cps

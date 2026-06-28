@@ -23,7 +23,7 @@ bool AccumulatorRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   std::string baseValue;
   for (size_t i = 0; i < BA.BaseCases.size(); ++i) {
     if (!BA.BaseCases[i].ValueExpr ||
-        ExprUsesParams(BA.BaseCases[i].ValueExpr, Ctx.ParamNameSet))
+        ExprUsesParams(BA.BaseCases[i].ValueExpr, Ctx.ParamDeclSet))
       return false;
     std::string val = BA.BaseCases[i].ValueStr;
     if (i == 0)

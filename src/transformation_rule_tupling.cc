@@ -92,14 +92,20 @@ CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   e.nl();
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
+  const ParmVarDecl *Param = FD->getParamDecl(0);
+
   e.block(sig, [&](CodeEmitter &b) {
     // Early base-case return.
     b.block("if (" + pName + " <= " + std::to_string(k - 1) + ")",
             [&](CodeEmitter &iw) {
               for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
                 std::string prefix = (bi == 0) ? "if (" : "else if (";
-                iw.line(prefix + BA.BaseCases[bi].CondStr + ") return " +
-                        BA.BaseCases[bi].ValueStr + ";");
+                const auto &bc = BA.BaseCases[bi];
+                std::string condStr =
+                    bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
+                std::string valStr =
+                    bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+                iw.line(prefix + condStr + ") return " + valStr + ";");
               }
               iw.line("return 0;");
             });
@@ -110,9 +116,10 @@ CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
       for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
         if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, j) ==
             EvalResult::True) {
-          std::string baseExpr =
-              ReplaceParamWithLiteral(BA.BaseCases[bi].ValueStr, pName,
-                                      std::to_string(j));
+          const ParmVarDecl *Param = FD->getParamDecl(0);
+          std::string baseExpr = ReplaceParamWithLiteral(
+              BA.BaseCases[bi].ValueExpr, Param, std::to_string(j),
+              Ctx.ASTCtx);
           b.line("vals[" + std::to_string(j) + "] = " + baseExpr + ";");
           break;
         }

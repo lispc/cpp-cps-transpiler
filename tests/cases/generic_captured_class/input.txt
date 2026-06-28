@@ -1,0 +1,1 @@
+tests/test_input_generic_captured_class.cc

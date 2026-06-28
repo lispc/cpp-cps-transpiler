@@ -1,0 +1,7 @@
+all_small(0) = true
+all_small(1) = true
+all_small(2) = true
+all_small(3) = true
+all_small(4) = false
+all_small(5) = false
+all_small(6) = false

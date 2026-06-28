@@ -9,6 +9,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -70,57 +71,67 @@ private:
 
 // === Mutual recursion analysis ===
 
-static void CollectCallees(const Stmt *S,
-                           std::unordered_set<std::string> &Callees) {
-  if (!S) return;
+using FuncGraph =
+    std::unordered_map<const FunctionDecl *,
+                       std::unordered_set<const FunctionDecl *>>;
+
+static void CollectCallees(
+    const Stmt *S, std::unordered_set<const FunctionDecl *> &Callees,
+    const std::unordered_set<const FunctionDecl *> &Defined) {
+  if (!S)
+    return;
   if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
-    if (const FunctionDecl *Callee = CE->getDirectCallee())
-      Callees.insert(Callee->getNameAsString());
+    if (const FunctionDecl *Callee = CE->getDirectCallee()) {
+      const FunctionDecl *Can = Callee->getCanonicalDecl();
+      if (Defined.count(Can))
+        Callees.insert(Can);
+    }
   }
   for (const Stmt *Child : S->children())
-    CollectCallees(Child, Callees);
+    CollectCallees(Child, Callees, Defined);
 }
 
-// Simple Tarjan SCC for function names.
-static std::vector<std::vector<std::string>>
-FindSCCs(const std::unordered_map<std::string, std::unordered_set<std::string>> &Graph) {
-  std::vector<std::vector<std::string>> SCCs;
-  std::unordered_map<std::string, int> Index;
-  std::unordered_map<std::string, int> LowLink;
-  std::unordered_set<std::string> OnStack;
-  std::vector<std::string> Stack;
+// Simple Tarjan SCC over function declarations.
+static std::vector<std::vector<const FunctionDecl *>>
+FindSCCs(const FuncGraph &Graph) {
+  std::vector<std::vector<const FunctionDecl *>> SCCs;
+  std::unordered_map<const FunctionDecl *, int> Index;
+  std::unordered_map<const FunctionDecl *, int> LowLink;
+  std::unordered_set<const FunctionDecl *> OnStack;
+  std::vector<const FunctionDecl *> Stack;
   int idx = 0;
 
-  std::function<void(const std::string &)> strongconnect =
-      [&](const std::string &Name) {
-    Index[Name] = idx;
-    LowLink[Name] = idx;
+  std::function<void(const FunctionDecl *)> strongconnect =
+      [&](const FunctionDecl *F) {
+    Index[F] = idx;
+    LowLink[F] = idx;
     ++idx;
-    Stack.push_back(Name);
-    OnStack.insert(Name);
+    Stack.push_back(F);
+    OnStack.insert(F);
 
-    auto It = Graph.find(Name);
+    auto It = Graph.find(F);
     if (It != Graph.end()) {
-      for (const std::string &Next : It->second) {
+      for (const FunctionDecl *Next : It->second) {
         if (!Graph.count(Next))
           continue; // not in graph (not a defined function)
         if (!Index.count(Next)) {
           strongconnect(Next);
-          LowLink[Name] = std::min(LowLink[Name], LowLink[Next]);
+          LowLink[F] = std::min(LowLink[F], LowLink[Next]);
         } else if (OnStack.count(Next)) {
-          LowLink[Name] = std::min(LowLink[Name], Index[Next]);
+          LowLink[F] = std::min(LowLink[F], Index[Next]);
         }
       }
     }
 
-    if (LowLink[Name] == Index[Name]) {
-      std::vector<std::string> SCC;
+    if (LowLink[F] == Index[F]) {
+      std::vector<const FunctionDecl *> SCC;
       while (true) {
-        std::string W = Stack.back();
+        const FunctionDecl *W = Stack.back();
         Stack.pop_back();
         OnStack.erase(W);
         SCC.push_back(W);
-        if (W == Name) break;
+        if (W == F)
+          break;
       }
       SCCs.push_back(SCC);
     }
@@ -140,20 +151,22 @@ public:
 
   void HandleTranslationUnit(ASTContext &Context) override {
     auto Functions = collectFunctions(Context);
-    auto FuncByName = buildFunctionMap(Functions);
+    auto CanonToDef = buildCanonToDef(Functions);
     auto CallGraph = buildCallGraph(Functions);
     auto SCCs = FindSCCs(CallGraph);
 
     std::vector<std::string> generated;
     for (const auto &SCC : SCCs) {
       if (SCC.size() == 1) {
-        processSingleFunction(SCC[0], CallGraph, FuncByName, generated);
+        auto It = CanonToDef.find(SCC[0]);
+        if (It != CanonToDef.end())
+          processSingleFunction(It->second, CallGraph, generated);
       } else {
-        processMutualGroup(SCC, FuncByName, generated);
+        processMutualGroup(SCC, CanonToDef, generated);
       }
     }
 
-    warnMissingTargets(FuncByName);
+    warnMissingTargets(Functions);
     writeOutput(generated);
   }
 
@@ -166,21 +179,24 @@ private:
     return Collector.getFunctions();
   }
 
-  std::unordered_map<std::string, FunctionDecl *>
-  buildFunctionMap(const std::vector<FunctionDecl *> &Functions) {
-    std::unordered_map<std::string, FunctionDecl *> Map;
+  std::unordered_map<const FunctionDecl *, FunctionDecl *>
+  buildCanonToDef(const std::vector<FunctionDecl *> &Functions) {
+    std::unordered_map<const FunctionDecl *, FunctionDecl *> Map;
     for (FunctionDecl *FD : Functions)
-      Map[FD->getNameAsString()] = FD;
+      Map[FD->getCanonicalDecl()] = FD;
     return Map;
   }
 
-  std::unordered_map<std::string, std::unordered_set<std::string>>
-  buildCallGraph(const std::vector<FunctionDecl *> &Functions) {
-    std::unordered_map<std::string, std::unordered_set<std::string>> Graph;
+  FuncGraph buildCallGraph(const std::vector<FunctionDecl *> &Functions) {
+    std::unordered_set<const FunctionDecl *> Defined;
+    for (FunctionDecl *FD : Functions)
+      Defined.insert(FD->getCanonicalDecl());
+
+    FuncGraph Graph;
     for (FunctionDecl *FD : Functions) {
-      std::unordered_set<std::string> Callees;
-      CollectCallees(FD->getBody(), Callees);
-      Graph[FD->getNameAsString()] = Callees;
+      std::unordered_set<const FunctionDecl *> Callees;
+      CollectCallees(FD->getBody(), Callees, Defined);
+      Graph[FD->getCanonicalDecl()] = Callees;
     }
     return Graph;
   }
@@ -189,23 +205,24 @@ private:
     return Opts.TargetFunctions.empty() || Opts.TargetFunctions.count(Name);
   }
 
+  static std::string getSimpleName(const FunctionDecl *FD) {
+    return FD->getNameAsString();
+  }
+
   void processSingleFunction(
-      const std::string &Name,
-      const std::unordered_map<std::string, std::unordered_set<std::string>> &CallGraph,
-      const std::unordered_map<std::string, FunctionDecl *> &FuncByName,
+      FunctionDecl *FD, const FuncGraph &CallGraph,
       std::vector<std::string> &GeneratedCode) {
-    auto It = CallGraph.find(Name);
-    if (It == CallGraph.end() || !It->second.count(Name))
+    const FunctionDecl *Can = FD->getCanonicalDecl();
+    auto It = CallGraph.find(Can);
+    if (It == CallGraph.end() || !It->second.count(Can))
       return; // not self-recursive
+
+    std::string Name = getSimpleName(FD);
     if (!isTarget(Name)) {
       llvm::outs() << "[Skipping] " << Name << " (not in --function list)\n";
       return;
     }
 
-    auto FDIt = FuncByName.find(Name);
-    if (FDIt == FuncByName.end())
-      return;
-    FunctionDecl *FD = FDIt->second;
     llvm::outs() << "[Detected recursive function] " << Name << "\n";
     cps::CpsResult result =
         cps::GenerateCPS(FD, Opts.ForceRule, Opts.ExplainSelection);
@@ -219,34 +236,40 @@ private:
   }
 
   void processMutualGroup(
-      const std::vector<std::string> &SCC,
-      const std::unordered_map<std::string, FunctionDecl *> &FuncByName,
+      const std::vector<const FunctionDecl *> &SCC,
+      const std::unordered_map<const FunctionDecl *, FunctionDecl *> &CanonToDef,
       std::vector<std::string> &GeneratedCode) {
-    for (const std::string &Name : SCC) {
-      if (!isTarget(Name)) {
-        for (const std::string &N : SCC)
-          llvm::outs() << "[Skipping] " << N
+    std::vector<const FunctionDecl *> Group;
+    for (const FunctionDecl *Can : SCC) {
+      auto It = CanonToDef.find(Can);
+      if (It == CanonToDef.end())
+        continue;
+      Group.push_back(It->second);
+    }
+    if (Group.empty())
+      return;
+
+    for (const FunctionDecl *FD : Group) {
+      if (!isTarget(getSimpleName(FD))) {
+        for (const FunctionDecl *F : Group)
+          llvm::outs() << "[Skipping] " << getSimpleName(F)
                        << " (mutual group not fully in --function list)\n";
         return;
       }
     }
 
-    std::vector<const FunctionDecl *> Group;
-    for (const std::string &Name : SCC) {
-      auto It = FuncByName.find(Name);
-      if (It == FuncByName.end())
-        return;
-      llvm::outs() << "[Detected recursive function] " << Name << "\n";
-      Group.push_back(It->second);
-    }
+    for (const FunctionDecl *FD : Group)
+      llvm::outs() << "[Detected recursive function] " << getSimpleName(FD)
+                   << "\n";
 
     cps::CpsResult result = cps::GenerateMutualCPS(Group);
     if (cps::IsError(result)) {
       const cps::CpsError &err = cps::GetError(result);
       llvm::errs() << "[cps-transpiler] Failed to transform mutual group: ";
-      for (size_t i = 0; i < SCC.size(); ++i) {
-        if (i > 0) llvm::errs() << ", ";
-        llvm::errs() << SCC[i];
+      for (size_t i = 0; i < Group.size(); ++i) {
+        if (i > 0)
+          llvm::errs() << ", ";
+        llvm::errs() << getSimpleName(Group[i]);
       }
       llvm::errs() << ": " << err.Message << "\n";
     } else {
@@ -254,12 +277,14 @@ private:
     }
   }
 
-  void warnMissingTargets(
-      const std::unordered_map<std::string, FunctionDecl *> &FuncByName) const {
+  void warnMissingTargets(const std::vector<FunctionDecl *> &Functions) const {
     if (Opts.TargetFunctions.empty())
       return;
+    std::unordered_set<std::string> Names;
+    for (FunctionDecl *FD : Functions)
+      Names.insert(FD->getNameAsString());
     for (const std::string &Name : Opts.TargetFunctions) {
-      if (!FuncByName.count(Name))
+      if (!Names.count(Name))
         llvm::errs() << "[cps-transpiler] Warning: --function target not found: "
                      << Name << "\n";
     }

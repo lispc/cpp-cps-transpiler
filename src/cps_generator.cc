@@ -24,12 +24,12 @@ namespace cps {
 bool NeedsSavedArg(
     const Expr *E, const std::vector<CallExpr *> &Holes,
     size_t HoleIdx,
-    const std::unordered_set<std::string> &ParamNames) {
-  if (ExprUsesParams(E, ParamNames))
+    const std::unordered_set<const ValueDecl *> &ParamDecls) {
+  if (ExprUsesParams(E, ParamDecls))
     return true;
   for (size_t i = HoleIdx + 1; i < Holes.size(); ++i) {
     for (unsigned a = 0; a < Holes[i]->getNumArgs(); ++a) {
-      if (ExprUsesParams(Holes[i]->getArg(a), ParamNames))
+      if (ExprUsesParams(Holes[i]->getArg(a), ParamDecls))
         return true;
     }
   }
@@ -93,18 +93,29 @@ std::string Indent(const std::string &s, int n) {
   return result;
 }
 
-std::string ReplaceParamsWithCur(const std::string &S,
-                                 const std::vector<std::string> &Params) {
+std::string ReplaceParamsWithCur(const Expr *E, const GenContext &Ctx) {
+  std::unordered_map<const ValueDecl *, std::string> repls;
+  for (const ParmVarDecl *P : Ctx.Params)
+    repls[P] = "__cps_cur." + P->getNameAsString();
+  return PrintExprWithDeclReplacements(E, repls, Ctx.ASTCtx);
+}
+
+// Legacy string-based fallback for synthetic conditions (e.g. switch-derived
+// BaseCase::CondStr) that do not have an AST CondExpr.
+std::string ReplaceParamsWithCurInString(
+    const std::string &S, const std::vector<std::string> &Params) {
   std::string result = S;
   for (const auto &p : Params)
-    result = ReplaceWholeWord(result, p, "cur." + p);
+    result = ReplaceWholeWord(result, p, "__cps_cur." + p);
   return result;
 }
 
-std::string ReplaceParamWithLiteral(const std::string &S,
-                                    const std::string &Param,
-                                    const std::string &Literal) {
-  return ReplaceWholeWord(S, Param, Literal);
+std::string ReplaceParamWithLiteral(const Expr *E, const ParmVarDecl *Param,
+                                    const std::string &Literal,
+                                    const ASTContext *Ctx) {
+  std::unordered_map<const ValueDecl *, std::string> repls;
+  repls[Param] = Literal;
+  return PrintExprWithDeclReplacements(E, repls, Ctx);
 }
 
 void EmitStmts(CodeEmitter &e, const std::vector<const Stmt *> &Stmts,
@@ -198,7 +209,10 @@ CpsResult GenerateCPS(const FunctionDecl *FD,
   Ctx.ExplainSelection = ExplainSelection;
 
   for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-    std::string pname = FD->getParamDecl(i)->getNameAsString();
+    const ParmVarDecl *PVD = FD->getParamDecl(i);
+    Ctx.Params.push_back(PVD);
+    Ctx.ParamDeclSet.insert(PVD);
+    std::string pname = PVD->getNameAsString();
     Ctx.ParamNames.push_back(pname);
     Ctx.ParamNameSet.insert(pname);
   }

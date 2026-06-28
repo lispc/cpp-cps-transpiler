@@ -1,3 +1,9 @@
+Error while trying to load a compilation database:
+Could not auto-detect compilation database for file "tests/test_input_minmax.cc"
+No compilation database found in /Users/zhangzhuo/repos/personal/cps/tests or any parent directory
+fixed-compilation-database: Error while opening fixed database: No such file or directory
+json-compilation-database: Error while opening JSON database: No such file or directory
+Running without flags.
 [Detected recursive function] min_tree
 
 // ================================
@@ -7,52 +13,52 @@
 // === Generated generic-stack code for function: min_tree ===
 
 #include <vector>
-#include <variant>
 #include <algorithm>
 
-struct min_treeFrame {
+struct __cps_min_treeFrame {
   int n;
-  min_treeFrame(int n) : n(n) {}
+  __cps_min_treeFrame(int n_) : n(n_) {}
 };
 
-struct min_treeCombineMarker {
+struct __cps_min_treeEntry {
+  enum class Tag { Frame, Marker } tag;
+  __cps_min_treeFrame frame;
   int count;
-  min_treeFrame frame;
-  min_treeCombineMarker(int c, min_treeFrame f) : count(c), frame(std::move(f)) {}
+  __cps_min_treeEntry(__cps_min_treeFrame f) : tag(Tag::Frame), frame(std::move(f)), count(0) {}
+  __cps_min_treeEntry(int c, __cps_min_treeFrame f) : tag(Tag::Marker), frame(std::move(f)), count(c) {}
 };
 
 int min_tree(int n) {
-  std::vector<std::variant<min_treeFrame, min_treeCombineMarker>> stack;
-  stack.emplace_back(min_treeFrame(n));
-  std::vector<int> values;
-  while (!stack.empty()) {
-    auto entry = stack.back();
-    stack.pop_back();
-    if (std::holds_alternative<min_treeCombineMarker>(entry)) {
-      auto marker = std::get<min_treeCombineMarker>(entry);
-      auto cur = marker.frame;
-      auto n = cur.n;
-      int v0 = values.back();
-      values.pop_back();
-      int v1 = values.back();
-      values.pop_back();
-      values.push_back(std::min(v0, v1));
+  std::vector<__cps_min_treeEntry> __cps_stack;
+  std::vector<int> __cps_values;
+  __cps_stack.emplace_back(__cps_min_treeFrame(n));
+  while (!__cps_stack.empty()) {
+    auto __cps_entry = __cps_stack.back();
+    __cps_stack.pop_back();
+    if (__cps_entry.tag == __cps_min_treeEntry::Tag::Marker) {
+      auto __cps_cur = __cps_entry.frame;
+      auto n = __cps_cur.n;
+      int v0 = __cps_values.back();
+      __cps_values.pop_back();
+      int v1 = __cps_values.back();
+      __cps_values.pop_back();
+      __cps_values.push_back(std::min(v0, v1));
     }
     else {
-      auto cur = std::get<min_treeFrame>(entry);
-      auto n = cur.n;
+      auto __cps_cur = __cps_entry.frame;
+      auto n = __cps_cur.n;
       if (n <= 0)
-        values.push_back(10);
+        __cps_values.push_back(10);
       else if (n == 1)
-        values.push_back(1);
+        __cps_values.push_back(1);
       else {
-        stack.emplace_back(min_treeCombineMarker(2, cur));
-        stack.emplace_back(min_treeFrame(n - 1));
-        stack.emplace_back(min_treeFrame(n - 2));
+        __cps_stack.emplace_back(__cps_min_treeEntry(2, __cps_min_treeFrame(n)));
+        __cps_stack.emplace_back(__cps_min_treeFrame(n - 1));
+        __cps_stack.emplace_back(__cps_min_treeFrame(n - 2));
       }
     }
   }
-  return values.back();
+  return __cps_values.back();
 }
 
 

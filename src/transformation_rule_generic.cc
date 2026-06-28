@@ -2,9 +2,11 @@
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
 #include "code_emitter.h"
+#include "stack_machine_codegen.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -76,7 +78,7 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
   std::vector<const VarDecl *> leadingCaptured;
   std::vector<const VarDecl *> middleCaptured;
   for (const VarDecl *VD : allLocals) {
-    if (IdentifierUsedInCode(combinedExpr, VD->getNameAsString())) {
+    if (ExprContainsDeclRefOutsideHoles(BA.RecExpr, VD, holes)) {
       if (IsLocalFromStmts(VD, BA.LeadingStmts))
         leadingCaptured.push_back(VD);
       else
@@ -88,125 +90,95 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
                         middleCaptured.end());
 
   CodeEmitter e;
-  EmitGeneratedBanner(e, "generic-stack", Ctx.FuncName);
-  std::vector<std::string> headers = {"vector"};
+  StackMachineCodegen smg(e, Ctx.FuncName, Ctx.RetType);
   if (needsAlgorithm)
-    headers.push_back("algorithm");
-  EmitIncludes(e, headers);
+    smg.addInclude("algorithm");
+
+  smg.emitBanner("generic-stack", Ctx.FuncName);
+  smg.emitIncludes();
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
-  // Frame struct with parameters + captured locals.
-  std::string frameName = EmitFrameStruct(e, FD, Ctx, capturedLocals);
+  for (unsigned i = 0; i < FD->getNumParams(); ++i)
+    smg.addParam(FD->getParamDecl(i));
+  for (const VarDecl *VD : capturedLocals)
+    smg.addLocal(VD);
 
-  std::string entryName = Ctx.FuncName + "StackEntry";
-  e.block("struct " + entryName, [&](CodeEmitter &b) {
-    b.line("enum class Tag { Frame, Marker } tag;");
-    b.line(frameName + " frame;");
-    b.line("int count;");
-    b.line(entryName + "(" + frameName + " f) : tag(Tag::Frame), " +
-           "frame(std::move(f)), count(0) {}");
-    b.line(entryName + "(int c, " + frameName + " f) : tag(Tag::Marker), " +
-           "frame(std::move(f)), count(c) {}");
-  }, ";");
-  e.nl();
+  smg.emitFrameStruct();
+  smg.emitStackEntryStruct();
+
+  auto buildFrameArgs = [&](const std::vector<std::string> &paramValues,
+                            const std::vector<const VarDecl *> &localValues) {
+    std::string s;
+    for (const auto &pv : paramValues) {
+      if (!s.empty())
+        s += ", ";
+      s += pv;
+    }
+    for (const VarDecl *VD : capturedLocals) {
+      if (!s.empty())
+        s += ", ";
+      if (std::find(localValues.begin(), localValues.end(), VD) !=
+          localValues.end())
+        s += VD->getNameAsString();
+      else
+        s += GetDefaultValueForType(VD->getType());
+    }
+    return s;
+  };
+
+  std::vector<std::string> paramNames;
+  for (unsigned i = 0; i < FD->getNumParams(); ++i)
+    paramNames.push_back(FD->getParamDecl(i)->getNameAsString());
 
   e.block(sig, [&](CodeEmitter &b) {
-    b.line("std::vector<" + entryName + "> stack;");
-    b.line("std::vector<" + Ctx.RetType + "> values;");
+    smg.emitStackDecl();
+    smg.emitValuesDecl();
 
-    // Execute leading statements, then push the initial frame with captured
-    // locals.
+    // Leading statements are executed once with the original parameters and
+    // initialise any captured locals that are shared by all frames.
     EmitStmts(b, BA.LeadingStmts, Ctx.ASTCtx);
-    {
-      std::string init = "stack.emplace_back(" + frameName + "(";
-      for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-        if (i > 0)
-          init += ", ";
-        init += FD->getParamDecl(i)->getNameAsString();
-      }
-      for (const VarDecl *VD : leadingCaptured) {
-        if (!init.empty() && init.back() != '(')
-          init += ", ";
-        init += VD->getNameAsString();
-      }
-      for (const VarDecl *VD : middleCaptured) {
-        if (!init.empty() && init.back() != '(')
-          init += ", ";
-        init += "0";
-      }
-      init += "));";
-      b.line(init);
-    }
 
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("auto entry = stack.back();");
-      w.line("stack.pop_back();");
-      w.block("if (entry.tag == " + entryName + "::Tag::Marker)",
-              [&](CodeEmitter &iw) {
-        iw.line("auto cur = entry.frame;");
-        EmitFrameUnpacks(iw, Ctx, capturedLocals);
-        for (size_t i = 0; i < holes.size(); ++i) {
-          iw.line(Ctx.RetType + " v" + std::to_string(i) +
-                  " = values.back();");
-          iw.line("values.pop_back();");
-        }
-        iw.line("values.push_back(" + combinedExpr + ");");
-      });
-      w.block("else", [&](CodeEmitter &iw) {
-        iw.line("auto cur = entry.frame;");
-        EmitFrameUnpacks(iw, Ctx, capturedLocals);
-        for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-          std::string prefix = (bi == 0) ? "if (" : "else if (";
-          const auto &bc = BA.BaseCases[bi];
-          iw.line(prefix + bc.CondStr + ")");
-          iw.inc();
-          iw.line("values.push_back(" + bc.ValueStr +
-                  ");");
-          iw.dec();
-        }
-        iw.line("else {");
-        iw.inc();
-        EmitStmts(iw, BA.MiddleStmts, Ctx.ASTCtx);
-        {
-          std::string marker = "stack.emplace_back(" + entryName + "(" +
-                               std::to_string(holes.size()) + ", " +
-                               frameName + "(";
-          for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-            if (i > 0)
-              marker += ", ";
-            marker += FD->getParamDecl(i)->getNameAsString();
-          }
-          for (const VarDecl *VD : capturedLocals) {
-            if (!marker.empty() && marker.back() != '(')
-              marker += ", ";
-            marker += VD->getNameAsString();
-          }
-          marker += ")));";
-          iw.line(marker);
-        }
-        for (size_t i = 0; i < holes.size(); ++i) {
-          std::string push = "stack.emplace_back(" + frameName + "(";
-          for (unsigned a = 0;
-               a < FD->getNumParams() && a < holes[i]->getNumArgs(); ++a) {
-            if (a > 0)
-              push += ", ";
-            push += PrintExpr(holes[i]->getArg(a), Ctx.ASTCtx);
-          }
-          for (const VarDecl *VD : capturedLocals) {
-            (void)VD;
-            if (!push.empty() && push.back() != '(')
-              push += ", ";
-            push += "0";
-          }
-          push += "));";
-          iw.line(push);
-        }
-        iw.dec();
-        iw.line("}");
-      });
+    b.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
+           buildFrameArgs(paramNames, leadingCaptured) + "));");
+
+    smg.beginLoop();
+    smg.emitMarkerBranch([&](CodeEmitter &iw) {
+      for (size_t i = 0; i < holes.size(); ++i) {
+        iw.line(Ctx.RetType + " v" + std::to_string(i) +
+                " = " + smg.valuesName() + ".back();");
+        iw.line(smg.valuesName() + ".pop_back();");
+      }
+      iw.line(smg.valuesName() + ".push_back(" + combinedExpr + ");");
     });
-    b.line("return values.back();");
+    smg.emitFrameBranch([&](CodeEmitter &iw) {
+      for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
+        std::string prefix = (bi == 0) ? "if (" : "else if (";
+        const auto &bc = BA.BaseCases[bi];
+        iw.line(prefix + bc.CondStr + ")");
+        iw.inc();
+        iw.line(smg.valuesName() + ".push_back(" + bc.ValueStr + ");");
+        iw.dec();
+      }
+      iw.line("else {");
+      iw.inc();
+      EmitStmts(iw, BA.MiddleStmts, Ctx.ASTCtx);
+      iw.line(smg.stackName() + ".emplace_back(" + smg.entryName() + "(" +
+              std::to_string(holes.size()) + ", " + smg.frameName() + "(" +
+              buildFrameArgs(paramNames, capturedLocals) + ")));");
+      for (size_t i = 0; i < holes.size(); ++i) {
+        std::vector<std::string> childParams;
+        for (unsigned a = 0;
+             a < FD->getNumParams() && a < holes[i]->getNumArgs(); ++a)
+          childParams.push_back(PrintExpr(holes[i]->getArg(a), Ctx.ASTCtx));
+        iw.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
+                buildFrameArgs(childParams, {}) + "));");
+      }
+      iw.dec();
+      iw.line("}");
+    });
+    smg.endLoop();
+    b.line("return " + smg.valuesName() + ".back();");
   });
 
   return e.str();

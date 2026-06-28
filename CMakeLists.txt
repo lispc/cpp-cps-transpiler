@@ -39,6 +39,7 @@ set(SOURCES
   src/transformation_rule_tree.cc
   src/transformation_rule_structural_subrules.cc
   src/transformation_rule_string.cc
+  src/stack_machine_codegen.cc
 )
 
 add_executable(cps-transpiler ${SOURCES})

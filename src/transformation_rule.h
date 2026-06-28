@@ -69,6 +69,14 @@ struct GenContext {
   std::string FuncName;
   std::string ArgType;
   std::string RetType;
+
+  // Primary parameter identity.  Rules should prefer Params/ParamDeclSet over
+  // ParamNames/ParamNameSet to avoid name-shadowing and overload issues.
+  std::vector<const clang::ParmVarDecl *> Params;
+  std::unordered_set<const clang::ValueDecl *> ParamDeclSet;
+
+  // Convenience strings derived from Params; kept for frame-field naming and
+  // diagnostics.
   std::vector<std::string> ParamNames;
   std::unordered_set<std::string> ParamNameSet;
   const clang::ASTContext *ASTCtx;
@@ -88,6 +96,23 @@ std::string PrintExpr(const clang::Expr *E, const clang::ASTContext *Ctx);
 std::string PrintExprWithReplacements(
     const clang::Expr *E,
     const std::unordered_map<const clang::Expr *, std::string> &Repls,
+    const clang::ASTContext *Ctx);
+
+// Print expression, replacing references to specific ValueDecls with strings.
+// This is the AST-level equivalent of whole-word string replacement and avoids
+// name-shadowing / member-access / comment-substitution bugs.
+std::string PrintExprWithDeclReplacements(
+    const clang::Expr *E,
+    const std::unordered_map<const clang::ValueDecl *, std::string> &DeclRepls,
+    const clang::ASTContext *Ctx);
+
+// Combined expression printer: replace specific sub-expressions first, then
+// replace references to specific ValueDecls.  Used when a recursive expression
+// has both holes (e.g. recursive calls) and parameters that need renaming.
+std::string PrintExprWithReplacements(
+    const clang::Expr *E,
+    const std::unordered_map<const clang::Expr *, std::string> &ExprRepls,
+    const std::unordered_map<const clang::ValueDecl *, std::string> &DeclRepls,
     const clang::ASTContext *Ctx);
 
 std::string PrintStmt(const clang::Stmt *S, const clang::ASTContext *Ctx);
@@ -111,8 +136,21 @@ void CollectHolesDeep(const clang::Expr *E, const std::string &FuncName,
 bool ContainsRecursiveCall(const clang::Expr *E, const std::string &FuncName);
 
 // Check whether an expression references any function parameters.
-bool ExprUsesParams(const clang::Expr *E,
-                    const std::unordered_set<std::string> &ParamNames);
+bool ExprUsesParams(
+    const clang::Expr *E,
+    const std::unordered_set<const clang::ValueDecl *> &ParamDecls);
+
+// Check whether an expression contains a reference to a specific ValueDecl.
+bool ExprContainsDeclRef(const clang::Expr *E,
+                         const clang::ValueDecl *VD);
+
+// Check whether E contains a reference to VD outside of any of the given
+// "hole" sub-expressions.  Used when E will be rewritten by replacing holes
+// with synthetic variables and we want to know which original locals are still
+// referenced in the resulting expression.
+bool ExprContainsDeclRefOutsideHoles(
+    const clang::Expr *E, const clang::ValueDecl *VD,
+    const std::vector<clang::CallExpr *> &Holes);
 
 // Conservatively check whether an expression is side-effect free.
 // Known-pure calls like min/max/std::min/std::max are whitelisted.
@@ -129,7 +167,7 @@ bool IsPureExprIgnoringRecursiveCalls(const clang::Expr *E,
 bool NeedsSavedArg(
     const clang::Expr *E, const std::vector<clang::CallExpr *> &Holes,
     size_t HoleIdx,
-    const std::unordered_set<std::string> &ParamNames);
+    const std::unordered_set<const clang::ValueDecl *> &ParamDecls);
 
 // Return the type to store in the Arg struct for a parameter.
 // References are stored by their underlying value type.
@@ -149,14 +187,19 @@ std::string ArgCtorDefun(const std::vector<std::string> &ParamValues,
 // Indent every line of a multi-line string by n spaces.
 std::string Indent(const std::string &s, int n);
 
-// Replace standalone parameter names in S with cur.<param>.
-std::string ReplaceParamsWithCur(const std::string &S,
-                                 const std::vector<std::string> &Params);
+// Print an expression with every parameter reference rewritten as cur.<param>.
+// AST-level replacement avoids name-shadowing and member-access collisions.
+std::string ReplaceParamsWithCur(const clang::Expr *E, const GenContext &Ctx);
 
-// Replace standalone occurrences of Param in S with Literal.
-std::string ReplaceParamWithLiteral(const std::string &S,
-                                    const std::string &Param,
-                                    const std::string &Literal);
+// String-based fallback for synthetic base-case fragments that have no AST.
+std::string ReplaceParamsWithCurInString(
+    const std::string &S, const std::vector<std::string> &ParamNames);
+
+// Print an expression with every reference to Param replaced by Literal.
+std::string ReplaceParamWithLiteral(const clang::Expr *E,
+                                    const clang::ParmVarDecl *Param,
+                                    const std::string &Literal,
+                                    const clang::ASTContext *Ctx);
 
 // Emit a list of statements as code lines.
 void EmitStmts(CodeEmitter &e,

@@ -1,3 +1,9 @@
+Error while trying to load a compilation database:
+Could not auto-detect compilation database for file "tests/test_input_fib.cc"
+No compilation database found in /Users/zhangzhuo/repos/personal/cps/tests or any parent directory
+fixed-compilation-database: Error while opening fixed database: No such file or directory
+json-compilation-database: Error while opening JSON database: No such file or directory
+Running without flags.
 [Detected recursive function] fib
 
 // ================================
@@ -17,7 +23,7 @@ int fib(int n) {
   vals[0] = 0;
   vals[1] = 1;
   for (int i = 2; i <= n; ++i) {
-    int next = (vals[1] + vals[0]);
+    int next = vals[1] + vals[0];
     vals[0] = vals[1];
     vals[1] = next;
   }

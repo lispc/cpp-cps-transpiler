@@ -1,0 +1,6 @@
+sum_boxed(0) = 0
+sum_boxed(1) = -1
+sum_boxed(2) = -3
+sum_boxed(3) = -7
+sum_boxed(4) = -14
+sum_boxed(5) = -26
