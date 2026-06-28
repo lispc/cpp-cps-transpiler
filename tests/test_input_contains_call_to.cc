@@ -101,11 +101,12 @@ const To *dyn_cast_or_null(const From *p) {
 bool ContainsCallTo(const Expr *E, const std::string &Name) {
   if (!E)
     return false;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
     if (GetCalleeName(CE) == Name)
       return true;
   }
-  for (const Stmt *Child : E->children()) {
+  for (const Stmt *Child : Clean->children()) {
     if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
       if (ContainsCallTo(ChildExpr, Name))
         return true;

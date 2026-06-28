@@ -96,14 +96,15 @@ bool ContainsCallToOneOf(const Expr *E,
                          const std::vector<std::string> &Names) {
   if (!E)
     return false;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
     std::string name = GetCalleeName(CE);
     for (const std::string &N : Names) {
       if (name == N)
         return true;
     }
   }
-  for (const Stmt *Child : E->children()) {
+  for (const Stmt *Child : Clean->children()) {
     if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
       if (ContainsCallToOneOf(ChildExpr, Names))
         return true;

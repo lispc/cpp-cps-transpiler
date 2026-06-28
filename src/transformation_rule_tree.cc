@@ -8,6 +8,7 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Lex/Lexer.h"
+#include <set>
 #include <string>
 #include <vector>
 
@@ -333,6 +334,25 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
 
   const Stmt *LoopBody = GetLoopBody(LoopStmt);
 
+  // Collect local variable declarations that appear before the loop.  If any
+  // of them are referenced by base cases or the loop itself, we need to
+  // re-emit them inside the explicit-stack loop body, because each popped
+  // frame has its own parameter values (e.g.  const Expr *Clean = E->...).
+  std::vector<const DeclStmt *> PreLoopDecls;
+  for (const Stmt *S : CS->body()) {
+    if (S == LoopStmt)
+      break;
+    if (const DeclStmt *DS = dyn_cast<DeclStmt>(S))
+      PreLoopDecls.push_back(DS);
+  }
+  std::set<std::string> PreLoopDeclNames;
+  for (const DeclStmt *DS : PreLoopDecls) {
+    for (auto *D : DS->decls()) {
+      if (const VarDecl *VD = dyn_cast<VarDecl>(D))
+        PreLoopDeclNames.insert(VD->getNameAsString());
+    }
+  }
+
   // Identify output-reference parameters (e.g., non-const lvalue references
   // used as out-arguments). They are not stored in frames.
   std::vector<bool> IsOutRef(FD->getNumParams(), false);
@@ -376,6 +396,50 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       PostLoopStmts.push_back(S);
   }
   bool HasPostLoop = IsVoid && !PostLoopStmts.empty();
+
+  // Determine which pre-loop local declarations are actually referenced by
+  // the base cases, the loop, or the post-loop if-statement.  For each
+  // referenced variable, remember its initializer so we can inline it in
+  // base-case checks and re-emit the declaration just before the loop.
+  std::set<std::string> ReferencedPreLoopDecls;
+  std::map<std::string, std::string> PreLoopVarReplacements;
+  {
+    std::vector<const Stmt *> RefTargets;
+    for (const Stmt *S : CS->body()) {
+      if (S == LoopStmt) {
+        RefTargets.push_back(S);
+        break;
+      }
+      if (isa<IfStmt>(S))
+        RefTargets.push_back(S);
+    }
+    if (PostLoopIf)
+      RefTargets.push_back(PostLoopIf);
+    for (const DeclStmt *DS : PreLoopDecls) {
+      for (auto *D : DS->decls()) {
+        const VarDecl *VD = dyn_cast<VarDecl>(D);
+        if (!VD)
+          continue;
+        const std::string &Name = VD->getNameAsString();
+        for (const Stmt *T : RefTargets) {
+          std::string src = T ? GetSourceText(T, Ctx.ASTCtx) : "";
+          if (!src.empty() && ContainsWholeWord(src, Name)) {
+            ReferencedPreLoopDecls.insert(Name);
+            if (const Expr *Init = VD->getInit())
+              PreLoopVarReplacements[Name] =
+                  StripOuterParens(PrintExpr(Init, Ctx.ASTCtx));
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  auto applyPreLoopReplacements = [&](std::string txt) -> std::string {
+    for (const auto &KV : PreLoopVarReplacements)
+      txt = ReplaceWholeWord(txt, KV.first, "(" + KV.second + ")");
+    return txt;
+  };
 
   std::string frameName = Ctx.FuncName + "Frame";
 
@@ -518,10 +582,25 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
             break;
           if (S == PostLoopIf)
             continue;
+          if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+            for (auto *D : DS->decls()) {
+              if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+                if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+                  std::string txt =
+                      NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+                  if (!txt.empty())
+                    target.raw(Indent(txt, target.current_indent() * 2) + "\n");
+                  break;
+                }
+              }
+            }
+            continue;
+          }
           if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
             std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
             if (!txt.empty()) {
               txt = EnsureSemicolon(txt);
+              txt = applyPreLoopReplacements(txt);
               // Inside the explicit stack loop, a void base case "return;"
               // means "skip the rest of this frame", not "exit the function".
               if (IsVoid && !inPostLoop)
@@ -538,10 +617,25 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
             break;
           if (S == PostLoopIf)
             continue;
+          if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+            for (auto *D : DS->decls()) {
+              if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+                if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+                  std::string txt =
+                      NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+                  if (!txt.empty())
+                    target.raw(Indent(txt, target.current_indent() * 2) + "\n");
+                  break;
+                }
+              }
+            }
+            continue;
+          }
           if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
             std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
             if (!txt.empty()) {
               txt = EnsureSemicolon(txt);
+              txt = applyPreLoopReplacements(txt);
               txt = ReplaceReturnsWithValuePush(txt, "values");
               target.raw(Indent(txt, target.current_indent() * 2) + "\n");
             }
@@ -644,18 +738,35 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
         if (IsBoolAllAny) {
           // Emit pre-loop base-case statements.  Literal boolean returns are
           // converted into pushes onto the values stack so that the marker
-          // frame can combine them with AND/OR.
+          // frame can combine them with AND/OR.  Referenced local declarations
+          // are emitted in original order so that base-case checks can use
+          // derived locals such as `const Expr *Clean = E->IgnoreParenImpCasts();`.
           for (const Stmt *S : CS->body()) {
             if (S == LoopStmt)
               break;
             if (S == PostLoopIf)
               continue;
+            if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+              for (auto *D : DS->decls()) {
+                if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+                  if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+                    std::string txt =
+                        NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+                    if (!txt.empty())
+                      w.raw(Indent(txt, w.current_indent() * 2) + "\n");
+                    break;
+                  }
+                }
+              }
+              continue;
+            }
             if (!isa<IfStmt>(S) && !isa<Expr>(S))
               continue;
             std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
             if (txt.empty())
               continue;
             txt = EnsureSemicolon(txt);
+            txt = applyPreLoopReplacements(txt);
             txt = ReplaceLiteralReturns(txt);
             w.raw(Indent(txt, w.current_indent() * 2) + "\n");
           }

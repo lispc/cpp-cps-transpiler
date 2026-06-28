@@ -95,13 +95,14 @@ const To *dyn_cast_or_null(const From *p) {
 bool ContainsCallToPrefix(const Expr *E, const std::string &Prefix) {
   if (!E)
     return false;
-  if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Clean)) {
     std::string name = GetCalleeName(CE);
     if (name.size() >= Prefix.size() &&
         name.compare(0, Prefix.size(), Prefix) == 0)
       return true;
   }
-  for (const Stmt *Child : E->children()) {
+  for (const Stmt *Child : Clean->children()) {
     if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
       if (ContainsCallToPrefix(ChildExpr, Prefix))
         return true;

@@ -41,12 +41,13 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 ### 测试
 
 ```bash
-python3 run_tests.py              # 直接运行回归测试
+python3 run_tests.py              # 直接运行回归测试（用例在 tests/cases/）
 cmake --build build --target check # 通过 CMake 运行测试
 ctest --test-dir build            # 通过 CTest 运行测试
 python3 tests/fuzz_regressions.py # 随机回归 fuzzing
 ```
 
+测试用例全部外置在 `tests/cases/<name>/`，由 `tests/cases/order.txt` 控制执行顺序。`docs/recursive_functions_inventory.txt` 记录了 `src/*.cc` 中每个递归函数是否已有对应 testcase。
 ### CLI 选项
 
 ```bash
@@ -173,7 +174,7 @@ int f(int n) {
 | 4 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
 | 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接 | 显式帧栈 | `fib(n-1)+fib(n-2)` |
 | 6 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
-| 7 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归 | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
+| 7 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归；支持 boolean any/all 与指针 find-first | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
 | 8 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
 
 规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule / MemoizationRule 不会输给 BinaryStackRule / GenericStackRule，AccumulatorRule 不会输给 GenericStackRule。
@@ -560,8 +561,12 @@ cps/
 │   └── cps.cc                # 手写 CPS 参考实现（历史遗留）
 ├── CMakeLists.txt            # 构建配置，提供 check/install 目标
 ├── README.md
-├── run_tests.py              # 自动化回归测试（用例列表）
+├── run_tests.py              # 自动化回归测试（用例从 tests/cases/order.txt 加载）
 ├── cps_testlib.py            # 测试流水线共享库（transpile/compile/run）
+├── scripts/                  # 辅助脚本
+│   └── inventory_recursive.py    # 生成源码递归函数清单
+├── docs/                     # 项目文档
+│   └── recursive_functions_inventory.txt  # src/*.cc 递归函数与 testcase 覆盖情况
 ├── benchmarks/               # 性能对比脚本
 ├── tests/
 │   ├── test_input_*.cc       # 测试输入
@@ -569,7 +574,10 @@ cps/
 │   └── fuzz_regressions.py   # 随机回归 fuzzing
 └── src/
     ├── main.cc                       # Clang Tooling 前端
-    ├── cps_generator.h/.cc           # AST 分析、代码生成入口
+    ├── cps_generator.h/.cc           # 代码生成入口与共享 helper
+    ├── cps_generator_print.cc        # AST 打印（PrintExpr / PrintStmt 等）
+    ├── cps_generator_analyze.cc      # AnalyzeBody：函数体归一化
+    ├── cps_generator_mutual.cc       # 相互递归代码生成
     ├── cps_result.h                  # CpsResult / CpsError 结构化错误类型
     ├── code_emitter.h                # 缩进管理代码生成器
     ├── transformation_rule.h         # BodyAnalysis、GenContext、规则接口
@@ -581,9 +589,9 @@ cps/
     ├── transformation_rule_memo.cc
     ├── transformation_rule_binary.cc
     ├── transformation_rule_generic.cc
-    ├── transformation_rule_tree.cc    # TreeTraversalRule（树遍历递归）
+    ├── transformation_rule_tree.cc    # TreeTraversalRule（树遍历递归，含 boolean any/all 与指针 find-first）
     ├── transformation_rule_string.cc  # StringStructuralRecursionRule
-    ├── transformation_rule_structural_subrules.cc  # 8 个独立的 StructuralRecursion 子规则
+    ├── transformation_rule_structural_subrules.cc  # 独立的 StructuralRecursion 子规则
     └── transformation_rule_defun.cc
 ```
 

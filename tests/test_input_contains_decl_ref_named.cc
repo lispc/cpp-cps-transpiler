@@ -97,11 +97,12 @@ const To *dyn_cast_or_null(const From *p) {
 bool ContainsDeclRefNamed(const Expr *E, const std::string &Name) {
   if (!E)
     return false;
-  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
+  const Expr *Clean = E->IgnoreParenImpCasts();
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Clean)) {
     if (DRE->getDecl()->getNameAsString() == Name)
       return true;
   }
-  for (const Stmt *Child : E->children()) {
+  for (const Stmt *Child : Clean->children()) {
     if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)) {
       if (ContainsDeclRefNamed(ChildExpr, Name))
         return true;
