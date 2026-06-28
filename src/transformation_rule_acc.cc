@@ -2,6 +2,7 @@
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
 #include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
@@ -120,9 +121,6 @@ CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
     }
   }
 
-  CodeEmitter e;
-  EmitGeneratedBanner(e, "accumulator", Ctx.FuncName);
-
   std::string accName = "acc";
   if (!op.empty()) {
     if (op == "+") accName = "sum";
@@ -142,28 +140,50 @@ CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
     loopCond += "!(" + BA.BaseCases[i].CondStr + ")";
   }
 
-  std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
-  e.block(sig, [&](CodeEmitter &b) {
-    EmitStmts(b, BA.LeadingStmts, Ctx.ASTCtx);
-    b.line(Ctx.RetType + " " + accName + " = " +
-           BA.BaseCases[0].ValueStr + ";");
-    b.block("while (" + loopCond + ")",
-            [&](CodeEmitter &w) {
-              EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
-              if (!op.empty()) {
-                w.line(accName + " = " + accName + " " + op + " " +
-                       StripOuterParens(PrintExpr(Step, Ctx.ASTCtx)) + ";");
-              } else {
-                w.line(accName + " = " + funcName + "(" + accName + ", " +
-                       StripOuterParens(PrintExpr(Step, Ctx.ASTCtx)) + ");");
-              }
-              EmitTailRecParamUpdate(w, FD, dyn_cast<CallExpr>(RecCall),
-                                     Ctx.ASTCtx);
-            });
-    b.line("return " + accName + ";");
-  });
+  IRBuilder b;
+  b.raw("// === Generated accumulator code for function: " + Ctx.FuncName +
+        " ===\n\n");
 
-  return e.str();
+  std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
+  auto body = IRBuilder::block();
+
+  EmitStmtsToIR(b, body.get(), BA.LeadingStmts, Ctx.ASTCtx);
+  IRBuilder::add(body.get(),
+                 IRBuilder::var(Ctx.RetType, accName,
+                                IRExpr(BA.BaseCases[0].ValueStr)));
+
+  auto loopBody = IRBuilder::block();
+  EmitStmtsToIR(b, loopBody.get(), BA.MiddleStmts, Ctx.ASTCtx);
+
+  std::string stepExpr = StripOuterParens(PrintExpr(Step, Ctx.ASTCtx));
+  if (!op.empty()) {
+    IRBuilder::add(loopBody.get(),
+                   IRBuilder::expr(
+                       IRExpr(accName + " = " + accName + " " + op + " " +
+                              stepExpr)));
+  } else {
+    IRBuilder::add(loopBody.get(),
+                   IRBuilder::expr(IRExpr(accName + " = " + funcName + "(" +
+                                          accName + ", " + stepExpr + ")")));
+  }
+
+  {
+    CodeEmitter tmp;
+    EmitTailRecParamUpdate(tmp, FD, dyn_cast<CallExpr>(RecCall), Ctx.ASTCtx);
+    std::istringstream iss(tmp.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (!line.empty())
+        IRBuilder::add(loopBody.get(), IRBuilder::rawStmt(line));
+    }
+  }
+
+  IRBuilder::add(body.get(),
+                 IRBuilder::while_(IRExpr(loopCond), std::move(loopBody)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr(accName)));
+  b.function(sig, std::move(body));
+
+  return PrintGeneratedUnit(b.unit);
 }
 
 int AccumulatorRule::cost() const { return RuleCatalog::Accumulator.Cost; }

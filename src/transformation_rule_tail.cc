@@ -2,6 +2,7 @@
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
 #include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
@@ -41,26 +42,46 @@ bool TailRecursionRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
 CpsResult TailRecursionRule::apply(const FunctionDecl *FD,
                                      const BodyAnalysis &BA,
                                      GenContext &Ctx) const {
-  CodeEmitter e;
-  EmitGeneratedBanner(e, "tail-recursion optimized", Ctx.FuncName);
+  IRBuilder b;
+  b.raw("// === Generated tail-recursion optimized code for function: " +
+        Ctx.FuncName + " ===\n\n");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
-  e.block(sig, [&](CodeEmitter &b) {
-    b.block("while (1)", [&](CodeEmitter &w) {
-      EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
-      for (const auto &bc : BA.BaseCases) {
-        if (bc.ValueStr.empty())
-          w.line("if (" + bc.CondStr + ") return;");
-        else
-          w.line("if (" + bc.CondStr + ") return " +
-                 bc.ValueStr + ";");
-      }
-      EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
-      EmitTailRecParamUpdate(w, FD, dyn_cast<CallExpr>(BA.RecExpr), Ctx.ASTCtx);
-    });
-  });
+  auto body = IRBuilder::block();
+  auto loopBody = IRBuilder::block();
 
-  return e.str();
+  EmitStmtsToIR(b, loopBody.get(), BA.LeadingStmts, Ctx.ASTCtx);
+  for (const auto &bc : BA.BaseCases) {
+    if (bc.ValueStr.empty())
+      IRBuilder::add(loopBody.get(),
+                     IRBuilder::if_(IRExpr(bc.CondStr), IRBuilder::ret()));
+    else
+      IRBuilder::add(loopBody.get(),
+                     IRBuilder::if_(IRExpr(bc.CondStr),
+                                    IRBuilder::ret(IRExpr(bc.ValueStr))));
+  }
+  EmitStmtsToIR(b, loopBody.get(), BA.MiddleStmts, Ctx.ASTCtx);
+
+  // EmitTailRecParamUpdate prints "auto next_p = ...;" and "p = next_p;".
+  // We reuse it by printing to a temporary CodeEmitter and turning each line
+  // into a raw IR statement.
+  {
+    CodeEmitter tmp;
+    EmitTailRecParamUpdate(tmp, FD, dyn_cast<CallExpr>(BA.RecExpr),
+                           Ctx.ASTCtx);
+    std::istringstream iss(tmp.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (!line.empty())
+        IRBuilder::add(loopBody.get(), IRBuilder::rawStmt(line));
+    }
+  }
+
+  IRBuilder::add(body.get(),
+                 IRBuilder::while_(IRExpr("1"), std::move(loopBody)));
+  b.function(sig, std::move(body));
+
+  return PrintGeneratedUnit(b.unit);
 }
 
 int TailRecursionRule::cost() const { return RuleCatalog::TailRecursion.Cost; }

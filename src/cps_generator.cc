@@ -1,5 +1,6 @@
 #include "cps_generator.h"
 #include "code_emitter.h"
+#include "output_ir.h"
 #include "transformation_rule.h"
 #include "transformation_rules.h"
 #include "transformation_rules_helpers.h"
@@ -127,6 +128,17 @@ void EmitStmts(CodeEmitter &e, const std::vector<const Stmt *> &Stmts,
     if (isa<Expr>(S) && !line.empty() && line.back() != ';')
       line += ';';
     e.line(line);
+  }
+}
+
+void EmitStmtsToIR(IRBuilder &builder, IRBlock *blk,
+                   const std::vector<const Stmt *> &Stmts,
+                   const ASTContext *Ctx) {
+  for (const Stmt *S : Stmts) {
+    std::string line = PrintStmt(S, Ctx);
+    if (isa<clang::Expr>(S) && !line.empty() && line.back() != ';')
+      line += ';';
+    IRBuilder::add(blk, IRBuilder::rawStmt(line));
   }
 }
 

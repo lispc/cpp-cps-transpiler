@@ -206,6 +206,14 @@ void EmitStmts(CodeEmitter &e,
                const std::vector<const clang::Stmt *> &Stmts,
                const clang::ASTContext *Ctx);
 
+class IRBuilder;
+class IRBlock;
+
+// Emit a list of statements as raw IR statements inside the given block.
+void EmitStmtsToIR(IRBuilder &builder, IRBlock *blk,
+                   const std::vector<const clang::Stmt *> &Stmts,
+                   const clang::ASTContext *Ctx);
+
 // Emit parameter unpack statements (auto p = arg.p;).
 void EmitUnpacksDefun(CodeEmitter &e, const std::string &ArgName,
                       const GenContext &Ctx);

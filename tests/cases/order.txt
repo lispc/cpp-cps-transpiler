@@ -73,6 +73,7 @@ contains_call_to
 contains_call_to_prefix
 contains_call_to_one_of
 contains_decl_ref_named
+expr_contains_decl_ref
 find_direct_recursive_call_in_expr
 mutual_rename
 mutual_nontail_rename

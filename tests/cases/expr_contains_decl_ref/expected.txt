@@ -1,0 +1,4 @@
+direct = 1
+nested = 1
+other = 0
+null = 0
