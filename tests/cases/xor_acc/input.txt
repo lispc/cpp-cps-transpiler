@@ -1,0 +1,1 @@
+tests/test_input_xor_acc.cc

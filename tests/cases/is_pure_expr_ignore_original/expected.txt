@@ -1,0 +1,9 @@
+leaf = 1
+targetCall = 1
+impureCall = 0
+pureCall = 1
+pureCallWithImpureArg = 0
+assign = 0
+comma = 0
+add = 1
+inc = 0

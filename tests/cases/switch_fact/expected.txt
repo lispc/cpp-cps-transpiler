@@ -1,0 +1,9 @@
+fact_switch(0) = 1
+fact_switch(1) = 1
+fact_switch(2) = 2
+fact_switch(3) = 6
+fact_switch(4) = 24
+fact_switch(5) = 120
+fact_switch(6) = 720
+fact_switch(7) = 5040
+fact_switch(8) = 40320

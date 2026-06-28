@@ -130,6 +130,57 @@ std::string ReplaceLiteralReturns(const std::string &S) {
   return r;
 }
 
+namespace {
+
+bool IsIdentifierChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+} // anonymous namespace
+
+// Rewrite every "return <expr>;" in a statement block into
+// "values.push_back(<expr>); continue;".  Used for find-first tree traversals
+// where base cases and found cases contribute a value instead of returning.
+std::string ReplaceReturnsWithValuePush(const std::string &S,
+                                        const std::string &ValuesVar) {
+  std::string r;
+  size_t i = 0;
+  while (i < S.size()) {
+    size_t pos = S.find("return", i);
+    if (pos == std::string::npos) {
+      r += S.substr(i);
+      break;
+    }
+    bool wordBoundary =
+        (pos == 0 || !IsIdentifierChar(S[pos - 1])) &&
+        (pos + 6 == S.size() || !IsIdentifierChar(S[pos + 6]));
+    if (!wordBoundary) {
+      r += S.substr(i, pos - i + 1);
+      i = pos + 1;
+      continue;
+    }
+    size_t semi = S.find(';', pos);
+    if (semi == std::string::npos) {
+      r += S.substr(i);
+      break;
+    }
+    std::string expr = S.substr(pos + 6, semi - (pos + 6));
+    // Trim whitespace.
+    size_t a = 0;
+    while (a < expr.size() &&
+           std::isspace(static_cast<unsigned char>(expr[a])))
+      ++a;
+    size_t b = expr.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(expr[b - 1])))
+      --b;
+    std::string trimmed = expr.substr(a, b - a);
+    r += S.substr(i, pos - i);
+    r += "{ " + ValuesVar + ".push_back(" + trimmed + "); continue; }";
+    i = semi + 1;
+  }
+  return r;
+}
+
 // Strip a trailing ':' (and surrounding whitespace) from a range-based for
 // loop variable source fragment.
 std::string StripTrailingColon(const std::string &S) {
@@ -232,10 +283,19 @@ bool TreeTraversalRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
   const Stmt *PostLoopAction = nullptr;
   bool IsBoolAllAny = false;
   bool IsAnd = false;
+  bool IsFindFirst = false;
+  const Expr *FindFirstReturnExpr = nullptr;
   bool IsVoid = FD->getReturnType()->isVoidType();
   if (!IsTreeTraversalShape(CS, Ctx.FuncName, Loop, RecIf, RecCall, IsVoid,
                             &PostLoopIf, &PostLoopAction,
-                            &IsBoolAllAny, &IsAnd))
+                            &IsBoolAllAny, &IsAnd,
+                            &IsFindFirst, &FindFirstReturnExpr))
+    return false;
+
+  // Find-first searches are only supported for pointer-like return types where
+  // a non-null result means "found".
+  if (IsFindFirst && !FD->getReturnType()->isPointerType() &&
+      !FD->getReturnType()->isReferenceType())
     return false;
 
   // TreeTraversalRule assumes the recursive call is to *this* overload.
@@ -263,9 +323,12 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
   const Stmt *PostLoopAction = nullptr;
   bool IsBoolAllAny = false;
   bool IsAnd = false;
+  bool IsFindFirst = false;
+  const Expr *FindFirstReturnExpr = nullptr;
   if (!IsTreeTraversalShape(CS, Ctx.FuncName, LoopStmt, RecIf, RecCall, IsVoid,
                             &PostLoopIf, &PostLoopAction,
-                            &IsBoolAllAny, &IsAnd))
+                            &IsBoolAllAny, &IsAnd,
+                            &IsFindFirst, &FindFirstReturnExpr))
     return "";
 
   const Stmt *LoopBody = GetLoopBody(LoopStmt);
@@ -331,13 +394,15 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
              FD->getParamDecl(i)->getNameAsString() + ";");
     }
-    bool NeedsDone = HasPostLoop || IsBoolAllAny;
+    bool NeedsMarker = IsBoolAllAny || IsFindFirst;
+    bool NeedsDone = HasPostLoop || NeedsMarker;
     if (NeedsDone)
       b.line("bool done;");
-    if (IsBoolAllAny) {
+    if (NeedsMarker) {
       b.line("bool is_marker;");
       b.line("std::size_t marker_count;");
-      b.line("bool marker_and;");
+      if (IsBoolAllAny)
+        b.line("bool marker_and;");
     }
     std::string ctor = frameName + "(";
     std::string init;
@@ -360,7 +425,7 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       ctor += "bool done_ = false";
       init += "done(done_)";
     }
-    if (IsBoolAllAny) {
+    if (NeedsMarker) {
       if (!init.empty()) {
         ctor += ", ";
         init += ", ";
@@ -369,8 +434,10 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       init += "is_marker(is_marker_)";
       ctor += ", std::size_t marker_count_ = 0";
       init += ", marker_count(marker_count_)";
-      ctor += ", bool marker_and_ = false";
-      init += ", marker_and(marker_and_)";
+      if (IsBoolAllAny) {
+        ctor += ", bool marker_and_ = false";
+        init += ", marker_and(marker_and_)";
+      }
     }
     ctor += ")";
     if (!init.empty())
@@ -394,6 +461,8 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     b.line("std::vector<" + frameName + "> stack;");
     if (IsBoolAllAny)
       b.line("std::vector<bool> values;");
+    if (IsFindFirst)
+      b.line("std::vector<" + Ctx.RetType + "> values;");
     std::string push0 = "stack.emplace_back(" + frameName + "(";
     bool firstPush = true;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
@@ -430,6 +499,19 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
         });
       }
 
+      if (IsFindFirst) {
+        w.block("if (cur.is_marker)", [&](CodeEmitter &mw) {
+          mw.line(Ctx.RetType + " res = nullptr;");
+          mw.block("for (std::size_t i = 0; i < cur.marker_count; ++i)",
+                   [&](CodeEmitter &fw) {
+                     fw.line(Ctx.RetType + " v = values.back(); values.pop_back();");
+                     fw.line("if (v) res = v;");
+                   });
+          mw.line("values.push_back(res);");
+          mw.line("continue;");
+        });
+      }
+
       auto emitBaseCases = [&](CodeEmitter &target, bool inPostLoop) {
         for (const Stmt *S : CS->body()) {
           if (IsLoopStmt(S))
@@ -444,6 +526,23 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
               // means "skip the rest of this frame", not "exit the function".
               if (IsVoid && !inPostLoop)
                 txt = ReplaceWholeWord(txt, "return", "continue");
+              target.raw(Indent(txt, target.current_indent() * 2) + "\n");
+            }
+          }
+        }
+      };
+
+      auto emitFindFirstBaseCases = [&](CodeEmitter &target) {
+        for (const Stmt *S : CS->body()) {
+          if (IsLoopStmt(S))
+            break;
+          if (S == PostLoopIf)
+            continue;
+          if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+            std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
+            if (!txt.empty()) {
+              txt = EnsureSemicolon(txt);
+              txt = ReplaceReturnsWithValuePush(txt, "values");
               target.raw(Indent(txt, target.current_indent() * 2) + "\n");
             }
           }
@@ -594,6 +693,41 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                      });
             rb.line("continue;");
           });
+        } else if (IsFindFirst) {
+          emitFindFirstBaseCases(w);
+
+          // Find-first search over a range-based for loop.  Push a marker frame
+          // followed by one frame per child in reverse order.  The marker later
+          // picks the first non-null child result.
+          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+          std::string rangeSrc =
+              GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+          std::string loopVarSrc = StripTrailingColon(
+              GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+          std::string markerPush = "stack.emplace_back(" + frameName + "(" +
+                                   buildFrameCtorArgsFromParams() +
+                                   ", false, true, __cps_n));";
+          std::string childPush = "stack.emplace_back(" + frameName + "(" +
+                                  buildFrameCtorArgs(RecCall) + "));";
+          w.block("", [&](CodeEmitter &rb) {
+            rb.line("auto &&__cps_range = " + rangeSrc + ";");
+            rb.line("std::size_t __cps_n = 0;");
+            rb.block("for (auto __cps_it = __cps_range.begin(); __cps_it != "
+                     "__cps_range.end(); ++__cps_it)",
+                     [&](CodeEmitter &cb) { cb.line("++__cps_n;"); });
+            rb.block("if (__cps_n == 0)", [&](CodeEmitter &eb) {
+              eb.line("values.push_back(nullptr);");
+              eb.line("continue;");
+            });
+            rb.line(markerPush);
+            rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
+                     "__cps_range.rend(); ++__cps_it)",
+                     [&](CodeEmitter &fb) {
+                       fb.line(loopVarSrc + " = *__cps_it;");
+                       fb.line(childPush);
+                     });
+            rb.line("continue;");
+          });
         } else {
           emitBaseCases(w, false);
 
@@ -653,19 +787,25 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     });
 
     // Emit final return.
+    const ReturnStmt *FinalRet = nullptr;
+    for (const Stmt *S : CS->body()) {
+      if (IsLoopStmt(S))
+        continue; // reset after loop
+      if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
+        FinalRet = RS;
+        break;
+      }
+    }
     if (IsBoolAllAny) {
       std::string emptyValue = IsAnd ? "true" : "false";
       b.line("return values.empty() ? " + emptyValue + " : values.back();");
+    } else if (IsFindFirst) {
+      std::string defaultExpr = "nullptr";
+      if (FinalRet && FinalRet->getRetValue())
+        defaultExpr = StripOuterParens(
+            PrintExpr(FinalRet->getRetValue(), Ctx.ASTCtx));
+      b.line("return values.empty() ? " + defaultExpr + " : values.back();");
     } else {
-      const ReturnStmt *FinalRet = nullptr;
-      for (const Stmt *S : CS->body()) {
-        if (IsLoopStmt(S))
-          continue; // reset after loop
-        if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
-          FinalRet = RS;
-          break;
-        }
-      }
       if (FinalRet && !IsVoid) {
         std::string txt = NormalizeIndentation(PrintStmt(FinalRet, Ctx.ASTCtx));
         if (!txt.empty()) {

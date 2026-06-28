@@ -1,0 +1,11 @@
+fib_switch(0) = 0
+fib_switch(1) = 1
+fib_switch(2) = 1
+fib_switch(3) = 2
+fib_switch(4) = 3
+fib_switch(5) = 5
+fib_switch(6) = 8
+fib_switch(7) = 13
+fib_switch(8) = 21
+fib_switch(9) = 34
+fib_switch(10) = 55

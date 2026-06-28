@@ -6,7 +6,6 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/Stmt.h"
-#include <cctype>
 #include <string>
 #include <vector>
 
@@ -15,19 +14,6 @@ namespace cps {
 using namespace clang;
 
 namespace {
-
-std::string TypeString(const ParmVarDecl *PVD) {
-  return PVD->getType().getAsString();
-}
-
-bool TypeContains(const std::string &T, const std::string &Pattern) {
-  std::string normalized;
-  for (char c : T) {
-    if (!std::isspace(static_cast<unsigned char>(c)))
-      normalized += c;
-  }
-  return normalized.find(Pattern) != std::string::npos;
-}
 
 static const std::vector<std::string> kSubexprAccessors = {
     "getLHS",     "getRHS",      "getSubExpr", "getArg",

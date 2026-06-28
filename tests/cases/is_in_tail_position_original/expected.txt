@@ -1,0 +1,7 @@
+tail_target = 1
+tail_other = 0
+tail_if_both = 1
+tail_if_mixed = 0
+tail_compound = 1
+tail_null = 0
+tail_empty_return = 0

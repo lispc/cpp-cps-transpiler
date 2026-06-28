@@ -1,0 +1,3 @@
+has_a = 1
+has_b = 1
+has_c = 1

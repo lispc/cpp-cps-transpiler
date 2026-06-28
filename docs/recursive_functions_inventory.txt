@@ -1,0 +1,41 @@
+# Recursive functions in src/*.cc
+
+| Function | Source | Test case(s) |
+|---|---|---|
+| UnwrapTrailingStmt | cps_generator_analyze.cc:17 | unwrap_trailing_stmt_original |
+| FlattenIfElse | cps_generator_analyze.cc:63 | flatten_if_else_original, if_else |
+| IsReturnOrIfReturnOrSwitch | cps_generator_analyze.cc:150 | is_return_or_if_return_or_switch_original |
+| CollectGroupHoles | cps_generator_mutual.cc:35 | collect_group_holes_original |
+| ContainsGroupCall | cps_generator_mutual.cc:54 | contains_group_call_original |
+| PrintExprWithReplacements | cps_generator_print.cc:69 | print_expr_with_replacements_original |
+| CollectCallees | main.cc:73 | collect_callees_original |
+| CollectDerivedVariables | transformation_rule_string.cc:73 | collect_derived_variables_original |
+| ContainsCall | transformation_rule_tree.cc:88 | contains_call_original, contains_call_real |
+| FindCondVarIf | transformation_rule_tree.cc:236 | find_cond_var_if_original, find_cond_var_if_real |
+| IsInTailPosition | transformation_rules_helpers.cc:24 | is_in_tail_position_original, is_in_tail_position_expr_original |
+| CollectLocalVarDecls | transformation_rules_helpers.cc:52 | collect_local_var_decls_original |
+| CollectHoles | transformation_rules_helpers.cc:139 | collect_holes_original |
+| CollectHolesDeep | transformation_rules_helpers.cc:158 | collect_holes_deep_original |
+| ContainsRecursiveCall | transformation_rules_helpers.cc:180 | contains_recursive_call, contains_rec |
+| CollectRecursiveCallsInStmt | transformation_rules_helpers.cc:198 | collect_recursive_calls_original |
+| FindRecursiveCallReturnIf | transformation_rules_helpers.cc:212 | find_recursive_call_return_if_original |
+| FindDirectRecursiveCallInExpr | transformation_rules_helpers.cc:427 | find_direct_recursive_call_in_expr |
+| ContainsNonRecursiveCall | transformation_rules_helpers.cc:674 | contains_non_recursive_call_original |
+| ExprUsesParams | transformation_rules_helpers.cc:715 | expr_uses_params_original, expr_uses |
+| IsPureExprImpl | transformation_rules_helpers.cc:738 | is_pure_expr_original |
+| IsPureExprIgnoringRecursiveCallsImpl | transformation_rules_helpers.cc:787 | is_pure_expr_ignore_original |
+| EvalConditionForParam | transformation_rules_helpers.cc:866 | eval_condition_original |
+| ParseLinearTerms | transformation_rules_helpers.cc:934 | parse_linear_terms_original |
+| ContainsCallTo | transformation_rules_helpers.cc:1092 | contains_call_to |
+| ContainsCallToPrefix | transformation_rules_helpers.cc:1109 | contains_call_to_prefix |
+| ContainsCallToOneOf | transformation_rules_helpers.cc:1128 | contains_call_to_one_of |
+| ContainsDeclRefNamed | transformation_rules_helpers.cc:1149 | contains_decl_ref_named |
+
+**Total recursive functions found:** 28
+
+- With matching test case: 28
+- Without matching test case: 0
+
+**Detection method:** AST extraction followed by cps-transpiler verification on a preprocessed translation unit.
+
+**Test-case matching:** function/test-case name similarity (snake_case, `_original`, `_real`, and substring matches).

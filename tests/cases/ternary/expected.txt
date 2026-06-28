@@ -1,0 +1,9 @@
+fact_t(0) = 1
+fact_t(1) = 1
+fact_t(2) = 2
+fact_t(3) = 6
+fact_t(4) = 24
+fact_t(5) = 120
+fact_t(6) = 720
+fact_t(7) = 5040
+fact_t(8) = 40320

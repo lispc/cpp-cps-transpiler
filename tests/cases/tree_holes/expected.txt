@@ -1,0 +1,5 @@
+hole[0] = 1
+hole[1] = 2
+hole[2] = 4
+hole[3] = 5
+hole[4] = 3

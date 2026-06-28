@@ -1,0 +1,9 @@
+with_local(0) = 1
+with_local(1) = 1
+with_local(2) = 2
+with_local(3) = 6
+with_local(4) = 24
+with_local(5) = 120
+with_local(6) = 720
+with_local(7) = 5040
+with_local(8) = 40320

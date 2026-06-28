@@ -1,0 +1,9 @@
+multi_base(0) = 0
+multi_base(1) = 1
+multi_base(2) = 1
+multi_base(3) = 2
+multi_base(4) = 3
+multi_base(5) = 5
+multi_base(6) = 8
+multi_base(7) = 13
+multi_base(8) = 21

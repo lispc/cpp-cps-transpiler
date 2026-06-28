@@ -1,0 +1,2 @@
+contains_rec(root, 7) = 1
+contains_rec(root, 8) = 0

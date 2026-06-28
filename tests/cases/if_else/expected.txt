@@ -1,0 +1,7 @@
+if_else(0) = 1
+if_else(1) = 1
+if_else(2) = 2
+if_else(3) = 4
+if_else(4) = 8
+if_else(5) = 16
+if_else(6) = 32

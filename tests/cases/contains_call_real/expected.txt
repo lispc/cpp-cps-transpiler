@@ -1,0 +1,3 @@
+contains target = 1
+contains null = 0
+null root = 0

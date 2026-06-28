@@ -1,0 +1,2 @@
+ref_accumulate(y=5, 3) = 8
+y after = 8

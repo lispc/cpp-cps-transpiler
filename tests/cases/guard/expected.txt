@@ -1,0 +1,12 @@
+fact_guard(-3) = -1
+fact_guard(-2) = -1
+fact_guard(-1) = -1
+fact_guard(0) = 1
+fact_guard(1) = 1
+fact_guard(2) = 2
+fact_guard(3) = 6
+fact_guard(4) = 24
+fact_guard(5) = 120
+fact_guard(6) = 720
+fact_guard(7) = 5040
+fact_guard(8) = 40320

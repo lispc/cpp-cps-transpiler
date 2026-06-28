@@ -1,0 +1,2 @@
+multi_cps(5, 10) = 130
+multi_cps(6, 10) = 210

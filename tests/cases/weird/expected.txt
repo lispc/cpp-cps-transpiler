@@ -1,0 +1,9 @@
+weird(0) = 0
+weird(1) = 1
+weird(2) = 1
+weird(3) = 3
+weird(4) = 5
+weird(5) = 11
+weird(6) = 21
+weird(7) = 43
+weird(8) = 85

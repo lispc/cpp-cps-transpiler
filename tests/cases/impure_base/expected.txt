@@ -1,0 +1,1 @@
+impure_base(5) = 15

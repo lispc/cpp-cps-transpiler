@@ -1,0 +1,6 @@
+fib0 = 1
+fib1 = 1
+fib2 = 2
+fib3 = 3
+fib4 = 5
+fib5 = 8

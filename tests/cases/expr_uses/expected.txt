@@ -1,0 +1,2 @@
+expr_uses(root, 7) = 1
+expr_uses(root, 9) = 0

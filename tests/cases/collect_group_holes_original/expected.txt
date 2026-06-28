@@ -1,0 +1,3 @@
+count = 1
+has_foo = 0
+has_bar = 1

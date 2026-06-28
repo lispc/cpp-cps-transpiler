@@ -1,0 +1,3 @@
+found_vd1 = 1
+found_vd2 = 1
+missing = 0

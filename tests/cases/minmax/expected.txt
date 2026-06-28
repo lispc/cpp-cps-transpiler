@@ -1,0 +1,7 @@
+min_tree(0) = 10
+min_tree(1) = 1
+min_tree(2) = 1
+min_tree(3) = 1
+min_tree(4) = 1
+min_tree(5) = 1
+min_tree(6) = 1

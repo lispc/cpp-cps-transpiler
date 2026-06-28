@@ -235,6 +235,93 @@ const IfStmt *FindRecursiveCallReturnIf(const Stmt *S,
   return nullptr;
 }
 
+void CollectDirectRecursiveCalls(const Stmt *Root,
+                                 const std::string &FuncName,
+                                 std::vector<const CallExpr *> &Out) {
+  if (!Root)
+    return;
+  std::vector<const Stmt *> Stack;
+  Stack.push_back(Root);
+  while (!Stack.empty()) {
+    const Stmt *S = Stack.back();
+    Stack.pop_back();
+    if (!S)
+      continue;
+    if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
+      if (IsDirectRecursiveCall(CE, FuncName)) {
+        Out.push_back(CE);
+        continue;
+      }
+    }
+    for (const Stmt *Child : S->children())
+      Stack.push_back(Child);
+  }
+}
+
+bool HasForbiddenLoop(const Stmt *Root, const std::string &FuncName,
+                      const ASTContext *Ctx) {
+  (void)Ctx;
+  if (!Root)
+    return false;
+  std::vector<const Stmt *> Stack;
+  Stack.push_back(Root);
+  while (!Stack.empty()) {
+    const Stmt *S = Stack.back();
+    Stack.pop_back();
+    if (!S)
+      continue;
+    if (isa<ForStmt>(S) || isa<WhileStmt>(S) || isa<DoStmt>(S)) {
+      std::vector<const CallExpr *> Calls;
+      CollectDirectRecursiveCalls(S, FuncName, Calls);
+      if (Calls.empty())
+        continue;
+      if (const ForStmt *FS = dyn_cast<ForStmt>(S)) {
+        bool argIteration = false;
+        for (const CallExpr *CE : Calls) {
+          for (unsigned i = 0; i < CE->getNumArgs() && !argIteration; ++i) {
+            if (IsCallTo(CE->getArg(i), "getArg")) {
+              argIteration = true;
+              break;
+            }
+          }
+        }
+        if (argIteration)
+          continue;
+      }
+      return true;
+    }
+    for (const Stmt *Child : S->children())
+      Stack.push_back(Child);
+  }
+  return false;
+}
+
+bool AllDirectRecursiveCallsNonNested(const Stmt *Root,
+                                      const std::string &FuncName) {
+  std::vector<const CallExpr *> Calls;
+  CollectDirectRecursiveCalls(Root, FuncName, Calls);
+  for (const CallExpr *CE : Calls) {
+    for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
+      if (ContainsRecursiveCall(CE->getArg(i), FuncName))
+        return false;
+    }
+  }
+  return true;
+}
+
+std::string TypeString(const ParmVarDecl *PVD) {
+  return PVD->getType().getAsString();
+}
+
+bool TypeContains(const std::string &T, const std::string &Pattern) {
+  std::string normalized;
+  for (char c : T) {
+    if (!std::isspace(static_cast<unsigned char>(c)))
+      normalized += c;
+  }
+  return normalized.find(Pattern) != std::string::npos;
+}
+
 bool IsLoopStmt(const Stmt *S) {
   return isa<ForStmt>(S) || isa<CXXForRangeStmt>(S);
 }
@@ -336,6 +423,71 @@ const IfStmt *FindBooleanAllAnyIf(const Stmt *LoopBody,
   return nullptr;
 }
 
+// Find a direct recursive call anywhere inside E.
+const CallExpr *FindDirectRecursiveCallInExpr(const Expr *E,
+                                              const std::string &FuncName) {
+  if (!E)
+    return nullptr;
+  if (const CallExpr *CE = dyn_cast<CallExpr>(E))
+    if (IsDirectRecursiveCall(CE, FuncName))
+      return CE;
+  for (const Stmt *Child : E->children()) {
+    if (const Expr *ChildE = dyn_cast_or_null<Expr>(Child))
+      if (const CallExpr *Found = FindDirectRecursiveCallInExpr(ChildE, FuncName))
+        return Found;
+  }
+  return nullptr;
+}
+
+// If LoopBody is an if-return whose condition (or condition-variable
+// initializer) contains a direct recursive call and whose then-branch returns
+// a value, this is a find-first search.  OutRecCall is set to the recursive
+// call and OutReturnExpr to the returned expression.
+const IfStmt *FindFindFirstIf(const Stmt *LoopBody,
+                              const std::string &FuncName,
+                              CallExpr *&OutRecCall,
+                              const Expr *&OutReturnExpr) {
+  const IfStmt *IfS = dyn_cast<IfStmt>(LoopBody);
+  if (!IfS) {
+    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(LoopBody)) {
+      if (CS->size() == 1)
+        IfS = dyn_cast<IfStmt>(*CS->body_begin());
+    }
+  }
+  if (!IfS)
+    return nullptr;
+
+  const ReturnStmt *RS = dyn_cast<ReturnStmt>(IfS->getThen());
+  if (!RS)
+    return nullptr;
+  const Expr *Ret = RS->getRetValue();
+  if (!Ret)
+    return nullptr;
+
+  // if (T x = rec(...)) return x;  or  if (T x = ...) return x;
+  if (const VarDecl *VD = IfS->getConditionVariable()) {
+    if (const Expr *Init = VD->getInit()) {
+      if (const CallExpr *CE = FindDirectRecursiveCallInExpr(Init, FuncName)) {
+        OutRecCall = const_cast<CallExpr *>(CE);
+        OutReturnExpr = Ret;
+        return IfS;
+      }
+    }
+  }
+
+  // if (rec(...)) return <value>;
+  const Expr *Cond = IfS->getCond()->IgnoreParenImpCasts();
+  if (const CallExpr *CE = dyn_cast<CallExpr>(Cond)) {
+    if (IsDirectRecursiveCall(CE, FuncName)) {
+      OutRecCall = const_cast<CallExpr *>(CE);
+      OutReturnExpr = Ret;
+      return IfS;
+    }
+  }
+
+  return nullptr;
+}
+
 } // anonymous namespace
 
 bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
@@ -344,7 +496,9 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
                           const IfStmt **OutPostLoopIf,
                           const Stmt **OutPostLoopAction,
                           bool *OutIsBoolAllAny,
-                          bool *OutIsAnd) {
+                          bool *OutIsAnd,
+                          bool *OutIsFindFirst,
+                          const Expr **OutFindFirstReturnExpr) {
   OutLoop = nullptr;
   OutRecIf = nullptr;
   OutRecCall = nullptr;
@@ -356,6 +510,8 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
     *OutIsBoolAllAny = false;
   if (OutIsAnd)
     *OutIsAnd = false;
+  if (OutIsFindFirst)
+    *OutIsFindFirst = false;
   if (!CS || CS->body_empty())
     return false;
 
@@ -476,6 +632,24 @@ bool IsTreeTraversalShape(const CompoundStmt *CS, const std::string &FuncName,
         *OutIsBoolAllAny = true;
       if (OutIsAnd)
         *OutIsAnd = isAnd;
+      return true;
+    }
+  }
+
+  // Find-first search over a range-based for loop: the loop body is
+  // "if (rec(...)) return <value>;" (possibly using a condition variable).
+  // The final return after the loop provides the default / not-found value.
+  if (seenReturnAfterLoop && isa<CXXForRangeStmt>(OutLoop)) {
+    const Expr *findFirstRet = nullptr;
+    CallExpr *findFirstCall = nullptr;
+    if (const IfStmt *FFIf =
+            FindFindFirstIf(LoopBody, FuncName, findFirstCall, findFirstRet)) {
+      OutRecIf = FFIf;
+      OutRecCall = findFirstCall;
+      if (OutIsFindFirst)
+        *OutIsFindFirst = true;
+      if (OutFindFirstReturnExpr)
+        *OutFindFirstReturnExpr = findFirstRet;
       return true;
     }
   }

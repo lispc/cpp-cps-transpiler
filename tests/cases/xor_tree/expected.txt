@@ -1,0 +1,9 @@
+xor_tree(0) = 0
+xor_tree(1) = 1
+xor_tree(2) = 1
+xor_tree(3) = 0
+xor_tree(4) = 1
+xor_tree(5) = 1
+xor_tree(6) = 0
+xor_tree(7) = 1
+xor_tree(8) = 1

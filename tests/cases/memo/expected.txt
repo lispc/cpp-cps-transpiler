@@ -1,0 +1,9 @@
+memo_weird(0) = 0
+memo_weird(1) = 1
+memo_weird(2) = 2
+memo_weird(3) = 5
+memo_weird(4) = 10
+memo_weird(5) = 21
+memo_weird(6) = 42
+memo_weird(7) = 85
+memo_weird(8) = 170

@@ -1,0 +1,4 @@
+outer_holes = 2
+inner_holes = 1
+other_holes = 0
+null_holes = 0

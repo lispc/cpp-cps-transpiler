@@ -7,7 +7,6 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include <algorithm>
-#include <cctype>
 #include <string>
 #include <vector>
 
@@ -16,110 +15,6 @@ namespace cps {
 using namespace clang;
 
 namespace {
-
-bool IsDirectRecursiveCall(const CallExpr *CE, const std::string &FuncName) {
-  if (!CE)
-    return false;
-  if (const FunctionDecl *Callee = CE->getDirectCallee())
-    return Callee->getNameAsString() == FuncName;
-  return false;
-}
-
-// Iterative collection of direct recursive calls.  We do not descend into the
-// arguments of a recursive call itself, matching the "holes" semantics used
-// elsewhere in the transpiler.
-void CollectDirectRecursiveCalls(const Stmt *Root,
-                                 const std::string &FuncName,
-                                 std::vector<const CallExpr *> &Out) {
-  if (!Root)
-    return;
-  std::vector<const Stmt *> Stack;
-  Stack.push_back(Root);
-  while (!Stack.empty()) {
-    const Stmt *S = Stack.back();
-    Stack.pop_back();
-    if (!S)
-      continue;
-    if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
-      if (IsDirectRecursiveCall(CE, FuncName)) {
-        Out.push_back(CE);
-        continue;
-      }
-    }
-    for (const Stmt *Child : S->children())
-      Stack.push_back(Child);
-  }
-}
-
-// Reject functions that contain loops with recursive calls inside them.
-// A non-recursive loop (e.g. the for-loop that finds the last statement in
-// IsInTailPosition's CompoundStmt case) is harmless for the explicit-stack
-// state machine.  We also allow classical for-loops that simply iterate over
-// the arguments of a CallExpr and recurse on each argument, because that is a
-// common structural-recursion pattern.
-bool HasForbiddenLoop(const Stmt *Root, const std::string &FuncName,
-                      const ASTContext *Ctx) {
-  if (!Root)
-    return false;
-  std::vector<const Stmt *> Stack;
-  Stack.push_back(Root);
-  while (!Stack.empty()) {
-    const Stmt *S = Stack.back();
-    Stack.pop_back();
-    if (!S)
-      continue;
-    if (isa<ForStmt>(S) || isa<WhileStmt>(S) || isa<DoStmt>(S)) {
-      std::vector<const CallExpr *> calls;
-      CollectDirectRecursiveCalls(S, FuncName, calls);
-      if (calls.empty())
-        continue;
-      if (const ForStmt *FS = dyn_cast<ForStmt>(S)) {
-        bool argIteration = false;
-        for (const CallExpr *CE : calls) {
-          for (unsigned i = 0; i < CE->getNumArgs() && !argIteration; ++i) {
-            if (IsCallTo(CE->getArg(i), "getArg")) {
-              argIteration = true;
-              break;
-            }
-          }
-        }
-        if (argIteration)
-          continue;
-      }
-      return true;
-    }
-    for (const Stmt *Child : S->children())
-      Stack.push_back(Child);
-  }
-  return false;
-}
-
-bool AllDirectRecursiveCallsNonNested(const Stmt *Root,
-                                      const std::string &FuncName) {
-  std::vector<const CallExpr *> Calls;
-  CollectDirectRecursiveCalls(Root, FuncName, Calls);
-  for (const CallExpr *CE : Calls) {
-    for (unsigned i = 0; i < CE->getNumArgs(); ++i) {
-      if (ContainsRecursiveCall(CE->getArg(i), FuncName))
-        return false;
-    }
-  }
-  return true;
-}
-
-std::string TypeString(const ParmVarDecl *PVD) {
-  return PVD->getType().getAsString();
-}
-
-bool TypeIs(const std::string &T, const std::string &Pattern) {
-  // Loose match: ignore spaces for shape detection.
-  std::string normalized;
-  for (char c : T) {
-    if (!std::isspace(static_cast<unsigned char>(c)))
-      normalized += c;
-  }
-  return normalized.find(Pattern) != std::string::npos;
-}
 
 bool CommonStructuralApplies(const FunctionDecl *FD, const GenContext &Ctx) {
   std::vector<const CallExpr *> recCalls;
@@ -145,9 +40,9 @@ bool IsInTailPositionRule::applies(
     return false;
   if (FD->getNumParams() != 2)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Stmt*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Stmt*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(1)), "FunctionDecl*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(1)), "FunctionDecl*"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -281,11 +176,11 @@ bool IsInTailPositionExprRule::applies(
     return false;
   if (FD->getNumParams() != 3)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Expr*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Expr*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(1)), "Stmt*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(1)), "Stmt*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(2)), "std::string"))
+  if (!TypeContains(TypeString(FD->getParamDecl(2)), "std::string"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -400,9 +295,9 @@ bool IsPureExprIgnoringRecursiveCallsRule::applies(
     return false;
   if (FD->getNumParams() != 2)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Expr*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Expr*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(1)), "std::string"))
+  if (!TypeContains(TypeString(FD->getParamDecl(1)), "std::string"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -595,7 +490,7 @@ bool IsReturnOrIfReturnOrSwitchRule::applies(
     return false;
   if (FD->getNumParams() != 1)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Stmt*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Stmt*"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -664,11 +559,11 @@ bool UnwrapTrailingStmtRule::applies(
   if (!CommonStructuralApplies(FD, Ctx))
     return false;
   (void)BA;
-  if (!TypeIs(Ctx.RetType, "Stmt*"))
+  if (!TypeContains(Ctx.RetType, "Stmt*"))
     return false;
   if (FD->getNumParams() != 1)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Stmt*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Stmt*"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -749,12 +644,12 @@ bool FlattenIfElseRule::applies(
     return false;
   if (FD->getNumParams() != 3)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Stmt*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Stmt*"))
     return false;
   if (TypeString(FD->getParamDecl(1)).find("BodyAnalysis") ==
       std::string::npos)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(2)), "ASTContext*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(2)), "ASTContext*"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -843,11 +738,11 @@ bool EvalConditionRule::applies(
     return false;
   if (FD->getNumParams() != 3)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Expr*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Expr*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(1)), "std::string"))
+  if (!TypeContains(TypeString(FD->getParamDecl(1)), "std::string"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(2)), "int"))
+  if (!TypeContains(TypeString(FD->getParamDecl(2)), "int"))
     return false;
 
   std::vector<const CallExpr *> calls;
@@ -1022,15 +917,15 @@ bool ParseLinearTermsRule::applies(
     return false;
   if (FD->getNumParams() != 5)
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(0)), "Expr*"))
+  if (!TypeContains(TypeString(FD->getParamDecl(0)), "Expr*"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(1)), "std::string"))
+  if (!TypeContains(TypeString(FD->getParamDecl(1)), "std::string"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(2)), "std::string"))
+  if (!TypeContains(TypeString(FD->getParamDecl(2)), "std::string"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(3)), "vector<LinearTerm>"))
+  if (!TypeContains(TypeString(FD->getParamDecl(3)), "vector<LinearTerm>"))
     return false;
-  if (!TypeIs(TypeString(FD->getParamDecl(4)), "int"))
+  if (!TypeContains(TypeString(FD->getParamDecl(4)), "int"))
     return false;
 
   std::vector<const CallExpr *> calls;

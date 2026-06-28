@@ -1,0 +1,11 @@
+double_fact(0) = 1
+double_fact(1) = 1
+double_fact(2) = 2
+double_fact(3) = 4
+double_fact(4) = 8
+double_fact(5) = 16
+double_fact(6) = 32
+double_fact(7) = 64
+double_fact(8) = 128
+double_fact(9) = 256
+double_fact(10) = 512

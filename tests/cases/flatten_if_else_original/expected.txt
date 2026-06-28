@@ -1,0 +1,4 @@
+base_n_5 = 1
+base_n_10 = 1
+base_n_15 = 1
+recursive_call = 1

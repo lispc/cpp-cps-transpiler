@@ -45,6 +45,22 @@ const clang::IfStmt *FindRecursiveCallReturnIf(const clang::Stmt *S,
                                                const std::string &FuncName,
                                                clang::CallExpr *&OutCall);
 
+// Collect direct recursive calls inside Root without descending into the
+// arguments of a recursive call itself (top-level "holes" semantics).
+void CollectDirectRecursiveCalls(const clang::Stmt *Root,
+                                 const std::string &FuncName,
+                                 std::vector<const clang::CallExpr *> &Out);
+
+// Return true if any loop in Root contains a recursive call, unless the loop is
+// a simple argument-iteration pattern (recursive call on getArg(i)).
+bool HasForbiddenLoop(const clang::Stmt *Root, const std::string &FuncName,
+                      const clang::ASTContext *Ctx);
+
+// Return true if no recursive call has another recursive call nested in its
+// arguments.
+bool AllDirectRecursiveCallsNonNested(const clang::Stmt *Root,
+                                      const std::string &FuncName);
+
 // Loop helpers.
 bool IsLoopStmt(const clang::Stmt *S);
 const clang::Stmt *GetLoopBody(const clang::Stmt *S);
@@ -68,7 +84,9 @@ bool IsTreeTraversalShape(const clang::CompoundStmt *CS,
                           const clang::IfStmt **OutPostLoopIf = nullptr,
                           const clang::Stmt **OutPostLoopAction = nullptr,
                           bool *OutIsBoolAllAny = nullptr,
-                          bool *OutIsAnd = nullptr);
+                          bool *OutIsAnd = nullptr,
+                          bool *OutIsFindFirst = nullptr,
+                          const clang::Expr **OutFindFirstReturnExpr = nullptr);
 
 // Purity analysis.
 bool IsKnownPureFunction(const std::string &Name);
@@ -85,6 +103,10 @@ bool IsParamMinusConst(const clang::Expr *E, const std::string &ParamName,
                        int &OutConst);
 bool ContainsNonRecursiveCall(const clang::Expr *E,
                               const std::string &FuncName);
+
+// Type-string helpers (loose matching for shape detection).
+std::string TypeString(const clang::ParmVarDecl *PVD);
+bool TypeContains(const std::string &T, const std::string &Pattern);
 
 // AST predicates: helpers that inspect Clang AST nodes directly instead of
 // relying on PrintExpr() + string matching.

@@ -1,0 +1,9 @@
+sum_loop(0) = 0
+sum_loop(1) = 1
+sum_loop(2) = 2
+sum_loop(3) = 5
+sum_loop(4) = 11
+sum_loop(5) = 21
+sum_loop(6) = 36
+sum_loop(7) = 57
+sum_loop(8) = 85

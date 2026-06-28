@@ -1,0 +1,8 @@
+return = 1
+if = 1
+switch = 1
+compound_return = 1
+compound_if = 1
+compound_two = 0
+compound_nested = 1
+other = 0

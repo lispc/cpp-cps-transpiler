@@ -1,0 +1,9 @@
+xor_acc(0) = 0
+xor_acc(1) = 1
+xor_acc(2) = 3
+xor_acc(3) = 0
+xor_acc(4) = 4
+xor_acc(5) = 1
+xor_acc(6) = 7
+xor_acc(7) = 0
+xor_acc(8) = 8

@@ -1,0 +1,3 @@
+scc_ab = 1
+scc_c = 1
+scc_de = 1

@@ -1,0 +1,10 @@
+eq=1
+ne=0
+lt=0
+gt=1
+le=1
+ge=1
+land=1
+lor=0
+lnot=0
+unknown=-1

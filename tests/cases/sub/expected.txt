@@ -1,0 +1,9 @@
+sub_acc(0) = 1
+sub_acc(1) = 1
+sub_acc(2) = -1
+sub_acc(3) = -4
+sub_acc(4) = -8
+sub_acc(5) = -13
+sub_acc(6) = -19
+sub_acc(7) = -26
+sub_acc(8) = -34

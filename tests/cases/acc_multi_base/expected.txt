@@ -1,0 +1,9 @@
+acc_multi_base(0) = 0
+acc_multi_base(1) = 0
+acc_multi_base(2) = 2
+acc_multi_base(3) = 5
+acc_multi_base(4) = 9
+acc_multi_base(5) = 14
+acc_multi_base(6) = 20
+acc_multi_base(7) = 27
+acc_multi_base(8) = 35

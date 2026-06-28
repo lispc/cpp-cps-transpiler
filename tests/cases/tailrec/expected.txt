@@ -1,0 +1,2 @@
+clamp_down(15) = 10
+clamp_down(100) = 10
