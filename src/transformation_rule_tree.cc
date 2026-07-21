@@ -2,6 +2,7 @@
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
 #include "output_ir.h"
+#include "stack_machine_codegen.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -18,26 +19,6 @@ using namespace clang;
 
 namespace {
 
-std::string GetSourceText(const Stmt *S, const ASTContext *Ctx) {
-  if (!S)
-    return "";
-  SourceRange Range = S->getSourceRange();
-  const SourceManager &SM = Ctx->getSourceManager();
-  const LangOptions &LO = Ctx->getLangOpts();
-  return Lexer::getSourceText(CharSourceRange::getTokenRange(Range), SM, LO)
-      .str();
-}
-
-std::string GetSourceText(const Decl *D, const ASTContext *Ctx) {
-  if (!D)
-    return "";
-  SourceRange Range = D->getSourceRange();
-  const SourceManager &SM = Ctx->getSourceManager();
-  const LangOptions &LO = Ctx->getLangOpts();
-  return Lexer::getSourceText(CharSourceRange::getTokenRange(Range), SM, LO)
-      .str();
-}
-
 // Ensure a statement source fragment ends with a semicolon.
 std::string EnsureSemicolon(const std::string &S) {
   std::string result = S;
@@ -47,32 +28,6 @@ std::string EnsureSemicolon(const std::string &S) {
       result.back() != '{')
     result += ';';
   return result;
-}
-
-// Walk an IfStmt chain, unwrapping single-statement CompoundStmt wrappers,
-// and return the then-statement of the deepest IfStmt.
-const IfStmt *GetInnermostIfStmt(const IfStmt *IfS) {
-  while (true) {
-    const Stmt *Then = IfS->getThen();
-    if (const IfStmt *Next = dyn_cast<IfStmt>(Then)) {
-      IfS = Next;
-      continue;
-    }
-    if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(Then)) {
-      if (CS->size() == 1) {
-        if (const IfStmt *Next = dyn_cast<IfStmt>(*CS->body_begin())) {
-          IfS = Next;
-          continue;
-        }
-      }
-    }
-    break;
-  }
-  return IfS;
-}
-
-const Stmt *GetInnermostThen(const IfStmt *IfS) {
-  return GetInnermostIfStmt(IfS)->getThen();
 }
 
 // Detect parameters used as output references (non-const lvalue references).
@@ -444,66 +399,37 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
     return txt;
   };
 
-  std::string frameName = "__cps_" + Ctx.FuncName + "Frame";
-  std::string stackName = "__cps_stack";
-  std::string valuesName = "__cps_values";
-  std::string curName = "__cps_cur";
+  StackMachineCodegen smg(Ctx.FuncName, Ctx.RetType);
+  const std::string frameName = smg.frameName();
+  const std::string stackName = smg.stackName();
+  const std::string valuesName = smg.valuesName();
+  const std::string curName = smg.curName();
 
   IRBuilder b;
   b.comment("=== Generated tree-traversal code for function: " + Ctx.FuncName +
             " ===");
-  b.include("vector");
+  smg.emitIncludes(b);
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
   // Frame struct: one field per non-output parameter, plus bookkeeping fields
   // for the post-loop phase (done) and value-combining markers.
-  {
-    IRStructData frame;
-    frame.name = frameName;
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (IsOutRef[i])
-        continue;
-      frame.fields.emplace_back(GetParamStorageType(FD->getParamDecl(i)),
-                                FD->getParamDecl(i)->getNameAsString());
-    }
-    bool NeedsMarker = IsBoolAllAny || IsFindFirst;
-    bool NeedsDone = HasPostLoop || NeedsMarker;
-    if (NeedsDone)
-      frame.fields.emplace_back("bool", "done");
-    if (NeedsMarker) {
-      frame.fields.emplace_back("bool", "is_marker");
-      frame.fields.emplace_back("std::size_t", "marker_count");
-      if (IsBoolAllAny)
-        frame.fields.emplace_back("bool", "marker_and");
-    }
-    std::vector<IRCtorParam> ctorParams;
-    std::vector<std::pair<std::string, std::string>> ctorInit;
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (IsOutRef[i])
-        continue;
-      std::string p = FD->getParamDecl(i)->getNameAsString();
-      ctorParams.emplace_back(GetParamStorageType(FD->getParamDecl(i)),
-                              p + "_");
-      ctorInit.emplace_back(p, p + "_");
-    }
-    if (NeedsDone) {
-      ctorParams.emplace_back("bool", "done_", "false");
-      ctorInit.emplace_back("done", "done_");
-    }
-    if (NeedsMarker) {
-      ctorParams.emplace_back("bool", "is_marker_", "false");
-      ctorInit.emplace_back("is_marker", "is_marker_");
-      ctorParams.emplace_back("std::size_t", "marker_count_", "0");
-      ctorInit.emplace_back("marker_count", "marker_count_");
-      if (IsBoolAllAny) {
-        ctorParams.emplace_back("bool", "marker_and_", "false");
-        ctorInit.emplace_back("marker_and", "marker_and_");
-      }
-    }
-    frame.ctors.emplace_back(std::move(ctorParams), std::move(ctorInit));
-    b.structDef(std::move(frame));
+  for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+    if (IsOutRef[i])
+      continue;
+    smg.addParam(FD->getParamDecl(i));
   }
+  const bool NeedsMarker = IsBoolAllAny || IsFindFirst;
+  const bool NeedsDone = HasPostLoop || NeedsMarker;
+  if (NeedsDone)
+    smg.addPlainField("bool", "done", "false", /*NoUnpack=*/true);
+  if (NeedsMarker) {
+    smg.addPlainField("bool", "is_marker", "false", /*NoUnpack=*/true);
+    smg.addPlainField("std::size_t", "marker_count", "0", /*NoUnpack=*/true);
+    if (IsBoolAllAny)
+      smg.addPlainField("bool", "marker_and", "false", /*NoUnpack=*/true);
+  }
+  smg.emitFrameStruct(b);
 
   auto body = IRBuilder::block();
 
@@ -519,36 +445,19 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
   // Initialize stack with the original arguments.
   IRBuilder::add(body.get(),
                  IRBuilder::var("std::vector<" + frameName + ">", stackName));
-  if (IsBoolAllAny)
-    IRBuilder::add(body.get(),
-                   IRBuilder::var("std::vector<bool>", valuesName));
-  if (IsFindFirst)
-    IRBuilder::add(body.get(), IRBuilder::var("std::vector<" + Ctx.RetType + ">",
-                                              valuesName));
-  std::string push0 = stackName + ".emplace_back(" + frameName + "(";
-  bool firstPush = true;
-  for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-    if (IsOutRef[i])
-      continue;
-    if (!firstPush)
-      push0 += ", ";
-    push0 += FD->getParamDecl(i)->getNameAsString();
-    firstPush = false;
-  }
-  push0 += "))";
-  IRBuilder::add(body.get(), IRBuilder::expr(IRExpr(push0)));
+  if (NeedsMarker)
+    smg.emitValuesDecl(body.get());
+  IRBuilder::add(body.get(),
+                 IRBuilder::expr(IRExpr(stackName + ".emplace_back(" +
+                                        frameName + "(" +
+                                        buildFrameCtorArgsFromParams() +
+                                        "))")));
 
   auto w = IRBuilder::block();
   IRBuilder::add(w.get(), IRBuilder::var("auto", curName,
                                          IRExpr(stackName + ".back()")));
   IRBuilder::add(w.get(), IRBuilder::expr(IRExpr(stackName + ".pop_back()")));
-  for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-    if (IsOutRef[i])
-      continue;
-    const std::string pName = FD->getParamDecl(i)->getNameAsString();
-    IRBuilder::add(w.get(), IRBuilder::var("auto", pName,
-                                           IRExpr(curName + "." + pName)));
-  }
+  smg.emitUnpackCurrent(w.get());
 
   if (IsBoolAllAny) {
     auto mw = IRBuilder::block();
@@ -600,7 +509,20 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                                   std::move(mw)));
   }
 
-  auto emitBaseCases = [&](IRBlock *target, bool inPostLoop) {
+  // How a "return" inside a pre-loop base case is rewritten.
+  enum class PreLoopReturnMode {
+    // Void traversal: skip the rest of this frame.
+    VoidToContinue,
+    // Find-first: contribute the returned value to the values stack.
+    PushValue,
+    // Boolean all/any: contribute the returned literal to the values stack.
+    PushLiteralBool,
+  };
+
+  // Emit the statements that precede the loop: referenced local declarations
+  // (recomputed per frame, since each popped frame has its own parameter
+  // values) followed by the base-case checks.
+  auto emitPreLoopStmts = [&](IRBlock *target, PreLoopReturnMode mode) {
     for (const Stmt *S : CS->body()) {
       if (IsLoopStmt(S))
         break;
@@ -620,56 +542,122 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
         }
         continue;
       }
-      if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-        std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
-        if (!txt.empty()) {
-          txt = EnsureSemicolon(txt);
-          txt = applyPreLoopReplacements(txt);
-          // Inside the explicit stack loop, a void base case "return;"
-          // means "skip the rest of this frame", not "exit the function".
-          if (IsVoid && !inPostLoop)
-            txt = ReplaceWholeWord(txt, "return", "continue");
-          IRBuilder::add(target, IRBuilder::rawStmt(txt));
-        }
-      }
-    }
-  };
-
-  auto emitFindFirstBaseCases = [&](IRBlock *target) {
-    for (const Stmt *S : CS->body()) {
-      if (IsLoopStmt(S))
+      // Boolean all/any also lifts plain expression statements; the other
+      // modes only handle if-statements (anything else was already emitted
+      // before the stack initialization).
+      if (!isa<IfStmt>(S) &&
+          !(mode == PreLoopReturnMode::PushLiteralBool && isa<Expr>(S)))
+        continue;
+      std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
+      if (txt.empty())
+        continue;
+      txt = EnsureSemicolon(txt);
+      txt = applyPreLoopReplacements(txt);
+      switch (mode) {
+      case PreLoopReturnMode::VoidToContinue:
+        // Inside the explicit stack loop, a void base case "return;" means
+        // "skip the rest of this frame", not "exit the function".
+        if (IsVoid)
+          txt = ReplaceWholeWord(txt, "return", "continue");
         break;
-      if (S == PostLoopIf)
-        continue;
-      if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
-        for (auto *D : DS->decls()) {
-          if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
-            if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
-              std::string txt =
-                  NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
-              if (!txt.empty())
-                IRBuilder::add(target, IRBuilder::rawStmt(txt));
-              break;
-            }
-          }
-        }
-        continue;
+      case PreLoopReturnMode::PushValue:
+        txt = ReplaceReturnsWithValuePush(txt, valuesName);
+        break;
+      case PreLoopReturnMode::PushLiteralBool:
+        txt = ReplaceLiteralReturns(txt, valuesName);
+        break;
       }
-      if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-        std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
-        if (!txt.empty()) {
-          txt = EnsureSemicolon(txt);
-          txt = applyPreLoopReplacements(txt);
-          txt = ReplaceReturnsWithValuePush(txt, valuesName);
-          IRBuilder::add(target, IRBuilder::rawStmt(txt));
-        }
-      }
+      IRBuilder::add(target, IRBuilder::rawStmt(txt));
     }
   };
 
-  auto emitPostLoopIf = [&](IRBlock *target) {
+  // Range-based for loops are rewritten to reverse iteration so that
+  // children are processed in original DFS order on the explicit stack.
+  const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+  std::string rangeSrc;
+  std::string loopVarSrc;
+  if (ForRange) {
+    rangeSrc = GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+    loopVarSrc = StripTrailingColon(
+        GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+  }
+
+  auto emitRangeDecl = [&](IRBlock *target) {
+    IRBuilder::add(target, IRBuilder::var("auto &&", "__cps_range",
+                                          IRExpr(rangeSrc)));
+  };
+
+  auto emitReversedLoop = [&](IRBlock *target, const std::string &pushStr) {
+    auto fb = IRBuilder::block();
+    IRBuilder::add(fb.get(), IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
+    IRBuilder::add(fb.get(), IRBuilder::rawStmt(pushStr));
+    IRBuilder::add(target,
+                   IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
+                                   IRExpr("__cps_it != __cps_range.rend()"),
+                                   "++__cps_it", std::move(fb)));
+  };
+
+  // Boolean all/any and find-first traversals over a range loop: count the
+  // children, push the empty result directly when there are none, push a
+  // marker frame that later combines the child values, then push one frame
+  // per child in reverse order.
+  auto emitCountedRangeTraversal = [&](IRBlock *target,
+                                       const std::string &markerPush,
+                                       const std::string &emptyPushValue,
+                                       const std::string &childPush) {
+    auto rb = IRBuilder::block();
+    emitRangeDecl(rb.get());
+    IRBuilder::add(rb.get(),
+                   IRBuilder::var("std::size_t", "__cps_n", IRExpr("0")));
+    IRBuilder::add(rb.get(),
+                   IRBuilder::for_("auto __cps_it = __cps_range.begin()",
+                                   IRExpr("__cps_it != __cps_range.end()"),
+                                   "++__cps_it",
+                                   IRBuilder::expr(IRExpr("++__cps_n"))));
+    auto eb = IRBuilder::block();
+    IRBuilder::add(eb.get(),
+                   IRBuilder::expr(IRExpr(valuesName + ".push_back(" +
+                                          emptyPushValue + ")")));
+    IRBuilder::add(eb.get(), IRBuilder::continue_());
+    IRBuilder::add(rb.get(),
+                   IRBuilder::if_(IRExpr("__cps_n == 0"), std::move(eb)));
+    IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerPush));
+    emitReversedLoop(rb.get(), childPush);
+    IRBuilder::add(rb.get(), IRBuilder::continue_());
+    IRBuilder::add(target, std::move(rb));
+  };
+
+  // Rewrite the source of a non-range loop so that the statement containing
+  // the recursive call is replaced by pushStr.  Returns false when the
+  // replacement anchor cannot be located (source-text matching is inherently
+  // fragile; fail loudly instead of emitting code that drops the push).
+  auto rewriteNonRangeLoop = [&](std::string &loopSrc,
+                                 const std::string &pushStr) -> bool {
+    std::string anchor;
+    if (RecIf) {
+      anchor = GetSourceText(RecIf, Ctx.ASTCtx);
+    } else {
+      // Replace the statement that directly contains the recursive call.
+      const Stmt *Encl =
+          FindDirectChildStmtContainingCall(LoopBody, RecCall);
+      anchor = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                    : GetSourceText(RecCall, Ctx.ASTCtx);
+    }
+    if (anchor.empty())
+      return false;
+    size_t pos = loopSrc.find(anchor);
+    if (pos == std::string::npos)
+      return false;
+    loopSrc.replace(pos, anchor.size(), pushStr);
+    size_t p2 = loopSrc.find(";;", pos);
+    if (p2 != std::string::npos)
+      loopSrc.replace(p2, 2, ";");
+    return true;
+  };
+
+  auto emitPostLoopIf = [&](IRBlock *target) -> bool {
     if (!PostLoopIf || !PostLoopAction)
-      return;
+      return true;
     const Stmt *InnerThen = GetInnermostThen(PostLoopIf);
     std::string postIfSrc = GetSourceText(PostLoopIf, Ctx.ASTCtx);
     std::string innerThenSrc = GetSourceText(InnerThen, Ctx.ASTCtx);
@@ -677,11 +665,18 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
         EnsureSemicolon(GetSourceText(PostLoopAction, Ctx.ASTCtx));
     std::string replacement = "{\n" + actionSrc + "\ncontinue;\n}";
     size_t pos = postIfSrc.find(innerThenSrc);
-    if (pos != std::string::npos) {
-      postIfSrc.replace(pos, innerThenSrc.size(), replacement);
-      IRBuilder::add(target,
-                     IRBuilder::rawStmt(NormalizeIndentation(postIfSrc)));
-    }
+    if (pos == std::string::npos)
+      return false;
+    postIfSrc.replace(pos, innerThenSrc.size(), replacement);
+    IRBuilder::add(target,
+                   IRBuilder::rawStmt(NormalizeIndentation(postIfSrc)));
+    return true;
+  };
+
+  auto anchorError = [&]() {
+    return MakeError(CpsErrorCode::InternalError,
+                     "could not locate the recursive call in the loop source",
+                     Ctx.FuncName);
   };
 
   if (HasPostLoop) {
@@ -694,65 +689,25 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
       }
     }
     auto ew = IRBuilder::block();
-    emitBaseCases(ew.get(), false);
+    emitPreLoopStmts(ew.get(), PreLoopReturnMode::VoidToContinue);
 
     std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
                           buildFrameCtorArgs(RecCall) + "));";
+    // Marker is pushed with current parameters, not recursive-call arguments.
     std::string markerStr = stackName + ".emplace_back(" + frameName + "(" +
                             buildFrameCtorArgsFromParams() + ", true));";
 
-    const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
     if (ForRange) {
-      std::string rangeSrc =
-          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-      std::string loopVarSrc = StripTrailingColon(
-          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
       auto rb = IRBuilder::block();
-      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
-                                              IRExpr(rangeSrc)));
+      emitRangeDecl(rb.get());
       IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerStr));
-      auto fb = IRBuilder::block();
-      IRBuilder::add(fb.get(),
-                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
-      IRBuilder::add(fb.get(), IRBuilder::rawStmt(pushStr));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
-                                     IRExpr("__cps_it != __cps_range.rend()"),
-                                     "++__cps_it", std::move(fb)));
+      emitReversedLoop(rb.get(), pushStr);
       IRBuilder::add(ew.get(), std::move(rb));
     } else {
-      // Marker is pushed with current parameters, not recursive-call
-      // arguments; reuse the current parameter names.
-      std::string markerStrNonRange =
-          stackName + ".emplace_back(" + frameName + "(" +
-          buildFrameCtorArgsFromParams() + ", true));";
-      IRBuilder::add(ew.get(), IRBuilder::rawStmt(markerStrNonRange));
+      IRBuilder::add(ew.get(), IRBuilder::rawStmt(markerStr));
       std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-      if (RecIf) {
-        std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
-        size_t pos = loopSrc.find(recIfSrc);
-        if (pos != std::string::npos) {
-          loopSrc.replace(pos, recIfSrc.size(), pushStr);
-          size_t p2 = loopSrc.find(";;", pos);
-          if (p2 != std::string::npos)
-            loopSrc.replace(p2, 2, ";");
-        }
-      } else {
-        // Replace the statement that directly contains the recursive call.
-        const Stmt *Encl =
-            FindDirectChildStmtContainingCall(LoopBody, RecCall);
-        std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
-                                     : GetSourceText(RecCall, Ctx.ASTCtx);
-        if (!toReplace.empty()) {
-          size_t pos = loopSrc.find(toReplace);
-          if (pos != std::string::npos) {
-            loopSrc.replace(pos, toReplace.size(), pushStr);
-            size_t p2 = loopSrc.find(";;", pos);
-            if (p2 != std::string::npos)
-              loopSrc.replace(p2, 2, ";");
-          }
-        }
-      }
+      if (!rewriteNonRangeLoop(loopSrc, pushStr))
+        return anchorError();
       IRBuilder::add(ew.get(),
                      IRBuilder::rawStmt(NormalizeIndentation(loopSrc)));
     }
@@ -760,183 +715,51 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
                                            std::move(dw), std::move(ew)));
   } else {
     if (IsBoolAllAny) {
-      // Emit pre-loop base-case statements.  Literal boolean returns are
-      // converted into pushes onto the values stack so that the marker
-      // frame can combine them with AND/OR.  Referenced local declarations
-      // are emitted in original order so that base-case checks can use
-      // derived locals such as `const Expr *Clean = E->IgnoreParenImpCasts();`.
-      for (const Stmt *S : CS->body()) {
-        if (S == LoopStmt)
-          break;
-        if (S == PostLoopIf)
-          continue;
-        if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
-          for (auto *D : DS->decls()) {
-            if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
-              if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
-                std::string txt =
-                    NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
-                if (!txt.empty())
-                  IRBuilder::add(w.get(), IRBuilder::rawStmt(txt));
-                break;
-              }
-            }
-          }
-          continue;
-        }
-        if (!isa<IfStmt>(S) && !isa<Expr>(S))
-          continue;
-        std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
-        if (txt.empty())
-          continue;
-        txt = EnsureSemicolon(txt);
-        txt = applyPreLoopReplacements(txt);
-        txt = ReplaceLiteralReturns(txt, valuesName);
-        IRBuilder::add(w.get(), IRBuilder::rawStmt(txt));
-      }
+      emitPreLoopStmts(w.get(), PreLoopReturnMode::PushLiteralBool);
 
       // Boolean all/any over a range-based for loop.  Push a marker frame
       // followed by one frame per child in reverse order.
-      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-      std::string rangeSrc =
-          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-      std::string loopVarSrc = StripTrailingColon(
-          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
       std::string emptyValue = IsAnd ? "true" : "false";
       std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
                                buildFrameCtorArgsFromParams() +
                                ", false, true, __cps_n, " + emptyValue + "));";
       std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
                               buildFrameCtorArgs(RecCall) + "));";
-      auto rb = IRBuilder::block();
-      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
-                                              IRExpr(rangeSrc)));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::var("std::size_t", "__cps_n", IRExpr("0")));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::for_("auto __cps_it = __cps_range.begin()",
-                                     IRExpr("__cps_it != __cps_range.end()"),
-                                     "++__cps_it",
-                                     IRBuilder::expr(IRExpr("++__cps_n"))));
-      auto eb = IRBuilder::block();
-      IRBuilder::add(eb.get(),
-                     IRBuilder::expr(IRExpr(valuesName + ".push_back(" +
-                                            emptyValue + ")")));
-      IRBuilder::add(eb.get(), IRBuilder::continue_());
-      IRBuilder::add(rb.get(),
-                     IRBuilder::if_(IRExpr("__cps_n == 0"), std::move(eb)));
-      IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerPush));
-      auto fb = IRBuilder::block();
-      IRBuilder::add(fb.get(),
-                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
-      IRBuilder::add(fb.get(), IRBuilder::rawStmt(childPush));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
-                                     IRExpr("__cps_it != __cps_range.rend()"),
-                                     "++__cps_it", std::move(fb)));
-      IRBuilder::add(rb.get(), IRBuilder::continue_());
-      IRBuilder::add(w.get(), std::move(rb));
+      emitCountedRangeTraversal(w.get(), markerPush, emptyValue, childPush);
     } else if (IsFindFirst) {
-      emitFindFirstBaseCases(w.get());
+      emitPreLoopStmts(w.get(), PreLoopReturnMode::PushValue);
 
       // Find-first search over a range-based for loop.  Push a marker frame
       // followed by one frame per child in reverse order.  The marker later
       // picks the first non-null child result.
-      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-      std::string rangeSrc =
-          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-      std::string loopVarSrc = StripTrailingColon(
-          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
       std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
                                buildFrameCtorArgsFromParams() +
                                ", false, true, __cps_n));";
       std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
                               buildFrameCtorArgs(RecCall) + "));";
-      auto rb = IRBuilder::block();
-      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
-                                              IRExpr(rangeSrc)));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::var("std::size_t", "__cps_n", IRExpr("0")));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::for_("auto __cps_it = __cps_range.begin()",
-                                     IRExpr("__cps_it != __cps_range.end()"),
-                                     "++__cps_it",
-                                     IRBuilder::expr(IRExpr("++__cps_n"))));
-      auto eb = IRBuilder::block();
-      IRBuilder::add(
-          eb.get(),
-          IRBuilder::expr(IRExpr(valuesName + ".push_back(nullptr)")));
-      IRBuilder::add(eb.get(), IRBuilder::continue_());
-      IRBuilder::add(rb.get(),
-                     IRBuilder::if_(IRExpr("__cps_n == 0"), std::move(eb)));
-      IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerPush));
-      auto fb = IRBuilder::block();
-      IRBuilder::add(fb.get(),
-                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
-      IRBuilder::add(fb.get(), IRBuilder::rawStmt(childPush));
-      IRBuilder::add(rb.get(),
-                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
-                                     IRExpr("__cps_it != __cps_range.rend()"),
-                                     "++__cps_it", std::move(fb)));
-      IRBuilder::add(rb.get(), IRBuilder::continue_());
-      IRBuilder::add(w.get(), std::move(rb));
+      emitCountedRangeTraversal(w.get(), markerPush, "nullptr", childPush);
     } else {
-      emitBaseCases(w.get(), false);
+      emitPreLoopStmts(w.get(), PreLoopReturnMode::VoidToContinue);
 
       // Emit the loop. For range-based for loops we rewrite to reverse
       // iteration so that children are processed in original DFS order on
       // the explicit stack.
       std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
                             buildFrameCtorArgs(RecCall) + "));";
-      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
       if (ForRange) {
-        std::string rangeSrc =
-            GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-        std::string loopVarSrc = StripTrailingColon(
-            GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
         auto rb = IRBuilder::block();
-        IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
-                                                IRExpr(rangeSrc)));
-        auto fb = IRBuilder::block();
-        IRBuilder::add(fb.get(),
-                       IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
-        IRBuilder::add(fb.get(), IRBuilder::rawStmt(pushStr));
-        IRBuilder::add(rb.get(),
-                       IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
-                                       IRExpr("__cps_it != __cps_range.rend()"),
-                                       "++__cps_it", std::move(fb)));
+        emitRangeDecl(rb.get());
+        emitReversedLoop(rb.get(), pushStr);
         IRBuilder::add(w.get(), std::move(rb));
       } else {
         std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-        if (RecIf) {
-          std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
-          size_t pos = loopSrc.find(recIfSrc);
-          if (pos != std::string::npos) {
-            loopSrc.replace(pos, recIfSrc.size(), pushStr);
-            size_t p2 = loopSrc.find(";;", pos);
-            if (p2 != std::string::npos)
-              loopSrc.replace(p2, 2, ";");
-          }
-        } else {
-          // Replace the statement that directly contains the recursive call.
-          const Stmt *Encl =
-              FindDirectChildStmtContainingCall(LoopBody, RecCall);
-          std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
-                                       : GetSourceText(RecCall, Ctx.ASTCtx);
-          if (!toReplace.empty()) {
-            size_t pos = loopSrc.find(toReplace);
-            if (pos != std::string::npos) {
-              loopSrc.replace(pos, toReplace.size(), pushStr);
-              size_t p2 = loopSrc.find(";;", pos);
-              if (p2 != std::string::npos)
-                loopSrc.replace(p2, 2, ";");
-            }
-          }
-        }
+        if (!rewriteNonRangeLoop(loopSrc, pushStr))
+          return anchorError();
         IRBuilder::add(w.get(),
                        IRBuilder::rawStmt(NormalizeIndentation(loopSrc)));
       }
-      emitPostLoopIf(w.get());
+      if (!emitPostLoopIf(w.get()))
+        return anchorError();
     }
   }
   IRBuilder::add(body.get(),
@@ -980,12 +803,6 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
 
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int TreeTraversalRule::cost() const { return RuleCatalog::TreeTraversal.Cost; }
-
-const char *TreeTraversalRule::name() const {
-  return RuleCatalog::TreeTraversal.Name;
 }
 
 } // namespace cps

@@ -9,6 +9,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -71,29 +72,34 @@ private:
 
 // === Mutual recursion analysis ===
 
+// Callee lists preserve first-discovery order so that SCC traversal (and
+// therefore the emitted output) is deterministic.
 using FuncGraph =
     std::unordered_map<const FunctionDecl *,
-                       std::unordered_set<const FunctionDecl *>>;
+                       std::vector<const FunctionDecl *>>;
 
 static void CollectCallees(
-    const Stmt *S, std::unordered_set<const FunctionDecl *> &Callees,
+    const Stmt *S, std::vector<const FunctionDecl *> &Callees,
+    std::unordered_set<const FunctionDecl *> &Seen,
     const std::unordered_set<const FunctionDecl *> &Defined) {
   if (!S)
     return;
   if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
     if (const FunctionDecl *Callee = CE->getDirectCallee()) {
       const FunctionDecl *Can = Callee->getCanonicalDecl();
-      if (Defined.count(Can))
-        Callees.insert(Can);
+      if (Defined.count(Can) && Seen.insert(Can).second)
+        Callees.push_back(Can);
     }
   }
   for (const Stmt *Child : S->children())
-    CollectCallees(Child, Callees, Defined);
+    CollectCallees(Child, Callees, Seen, Defined);
 }
 
-// Simple Tarjan SCC over function declarations.
+// Simple Tarjan SCC over function declarations.  Nodes are visited in the
+// given Order (source order) so the resulting SCC list is deterministic.
 static std::vector<std::vector<const FunctionDecl *>>
-FindSCCs(const FuncGraph &Graph) {
+FindSCCs(const FuncGraph &Graph,
+         const std::vector<const FunctionDecl *> &Order) {
   std::vector<std::vector<const FunctionDecl *>> SCCs;
   std::unordered_map<const FunctionDecl *, int> Index;
   std::unordered_map<const FunctionDecl *, int> LowLink;
@@ -137,9 +143,9 @@ FindSCCs(const FuncGraph &Graph) {
     }
   };
 
-  for (const auto &KV : Graph) {
-    if (!Index.count(KV.first))
-      strongconnect(KV.first);
+  for (const FunctionDecl *F : Order) {
+    if (!Index.count(F))
+      strongconnect(F);
   }
   return SCCs;
 }
@@ -151,9 +157,20 @@ public:
 
   void HandleTranslationUnit(ASTContext &Context) override {
     auto Functions = collectFunctions(Context);
+    // Sort by source position so that SCC discovery order (and hence the
+    // order of emitted code blocks) is deterministic.
+    const SourceManager &SM = Context.getSourceManager();
+    std::sort(Functions.begin(), Functions.end(),
+              [&SM](const FunctionDecl *A, const FunctionDecl *B) {
+                return SM.getFileOffset(A->getBeginLoc()) <
+                       SM.getFileOffset(B->getBeginLoc());
+              });
     auto CanonToDef = buildCanonToDef(Functions);
     auto CallGraph = buildCallGraph(Functions);
-    auto SCCs = FindSCCs(CallGraph);
+    std::vector<const FunctionDecl *> Order;
+    for (const FunctionDecl *FD : Functions)
+      Order.push_back(FD->getCanonicalDecl());
+    auto SCCs = FindSCCs(CallGraph, Order);
 
     std::vector<std::string> generated;
     for (const auto &SCC : SCCs) {
@@ -194,9 +211,10 @@ private:
 
     FuncGraph Graph;
     for (FunctionDecl *FD : Functions) {
-      std::unordered_set<const FunctionDecl *> Callees;
-      CollectCallees(FD->getBody(), Callees, Defined);
-      Graph[FD->getCanonicalDecl()] = Callees;
+      std::vector<const FunctionDecl *> Callees;
+      std::unordered_set<const FunctionDecl *> Seen;
+      CollectCallees(FD->getBody(), Callees, Seen, Defined);
+      Graph[FD->getCanonicalDecl()] = std::move(Callees);
     }
     return Graph;
   }
@@ -214,7 +232,9 @@ private:
       std::vector<std::string> &GeneratedCode) {
     const FunctionDecl *Can = FD->getCanonicalDecl();
     auto It = CallGraph.find(Can);
-    if (It == CallGraph.end() || !It->second.count(Can))
+    if (It == CallGraph.end() ||
+        std::find(It->second.begin(), It->second.end(), Can) ==
+            It->second.end())
       return; // not self-recursive
 
     std::string Name = getSimpleName(FD);

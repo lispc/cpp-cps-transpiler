@@ -110,13 +110,15 @@ CpsResult TreeFoldRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   std::unordered_map<const ValueDecl *, std::string> declRepls;
   declRepls[NodeParam] = nodeExpr;
 
+  BaseCaseRename nodeRename;
+  nodeRename.DeclRepls = declRepls;
+  nodeRename.StringRepls.emplace_back(NodeParam->getNameAsString(), nodeExpr);
+  nodeRename.StripParens = true;
+  nodeRename.UseDeclPrinter = true;
+
   auto printOnNode = [&](const BaseCase &bc, bool cond) -> std::string {
-    const Expr *E = cond ? bc.CondExpr : bc.ValueExpr;
-    if (E)
-      return StripOuterParens(
-          PrintExprWithDeclReplacements(E, declRepls, Ctx.ASTCtx));
-    return ReplaceWholeWord(cond ? bc.CondStr : bc.ValueStr,
-                            NodeParam->getNameAsString(), nodeExpr);
+    return cond ? PrintBaseCaseCond(bc, Ctx.ASTCtx, nodeRename)
+                : PrintBaseCaseValue(bc, Ctx.ASTCtx, nodeRename);
   };
 
   // Expand branch: push the continuation frame, then the child frames in
@@ -183,9 +185,5 @@ CpsResult TreeFoldRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
 }
-
-int TreeFoldRule::cost() const { return RuleCatalog::TreeFold.Cost; }
-
-const char *TreeFoldRule::name() const { return RuleCatalog::TreeFold.Name; }
 
 } // namespace cps

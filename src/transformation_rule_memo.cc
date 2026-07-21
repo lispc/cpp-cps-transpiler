@@ -105,10 +105,8 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
     auto earlyBlk = IRBuilder::block();
     std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>> branches;
     for (const auto &bc : BA.BaseCases) {
-      std::string condStr =
-          bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
-      std::string valStr =
-          bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+      std::string condStr = PrintBaseCaseCond(bc, Ctx.ASTCtx);
+      std::string valStr = PrintBaseCaseValue(bc, Ctx.ASTCtx);
       auto thenBlk = IRBuilder::block();
       IRBuilder::add(thenBlk.get(), IRBuilder::ret(IRExpr(valStr)));
       branches.emplace_back(std::move(condStr), std::move(thenBlk));
@@ -152,12 +150,6 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
 
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int MemoizationRule::cost() const { return RuleCatalog::Memoization.Cost; }
-
-const char *MemoizationRule::name() const {
-  return RuleCatalog::Memoization.Name;
 }
 
 } // namespace cps

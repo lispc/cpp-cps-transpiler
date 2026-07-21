@@ -207,10 +207,4 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
   return PrintGeneratedUnit(b.unit);
 }
 
-int GenericStackRule::cost() const { return RuleCatalog::GenericStack.Cost; }
-
-const char *GenericStackRule::name() const {
-  return RuleCatalog::GenericStack.Name;
-}
-
 } // namespace cps

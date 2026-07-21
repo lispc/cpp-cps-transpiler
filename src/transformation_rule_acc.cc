@@ -140,8 +140,8 @@ CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
   }
 
   IRBuilder b;
-  b.raw("// === Generated accumulator code for function: " + Ctx.FuncName +
-        " ===\n\n");
+  b.comment("=== Generated accumulator code for function: " + Ctx.FuncName +
+            " ===");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   auto body = IRBuilder::block();
@@ -175,12 +175,6 @@ CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
   b.function(sig, std::move(body));
 
   return PrintGeneratedUnit(b.unit);
-}
-
-int AccumulatorRule::cost() const { return RuleCatalog::Accumulator.Cost; }
-
-const char *AccumulatorRule::name() const {
-  return RuleCatalog::Accumulator.Name;
 }
 
 } // namespace cps

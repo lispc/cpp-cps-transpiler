@@ -173,9 +173,9 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   auto body = IRBuilder::block();
   IRBuilder::add(body.get(),
                  IRBuilder::var("std::vector<" + Ctx.FuncName + "Frame>",
-                                "k"));
+                                "__cps_k"));
   IRBuilder::add(body.get(),
-                 IRBuilder::expr(IRExpr("k.emplace_back(" + contName +
+                 IRBuilder::expr(IRExpr("__cps_k.emplace_back(" + contName +
                                         "::Done)")));
   {
     std::vector<std::string> argDefaults;
@@ -207,7 +207,7 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   auto elseBlk = IRBuilder::block();
   EmitStmtsToIR(b, elseBlk.get(), BA.MiddleStmts, Ctx.ASTCtx);
   {
-    std::string push = "k.emplace_back(" + contName + "::K0";
+    std::string push = "__cps_k.emplace_back(" + contName + "::K0";
     if (closures[0].NeedsSavedArg)
       push += ", std::vector<" + Ctx.RetType + ">{}, arg";
     else
@@ -239,8 +239,8 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   // Continuation machine.
   auto drainBody = IRBuilder::block();
   IRBuilder::add(drainBody.get(),
-                 IRBuilder::var("auto", "f", IRExpr("k.back()")));
-  IRBuilder::add(drainBody.get(), IRBuilder::expr(IRExpr("k.pop_back()")));
+                 IRBuilder::var("auto", "f", IRExpr("__cps_k.back()")));
+  IRBuilder::add(drainBody.get(), IRBuilder::expr(IRExpr("__cps_k.pop_back()")));
   auto sw = IRBuilder::switch_(IRExpr("f.tag"));
   {
     auto doneBlk = IRBuilder::block();
@@ -270,7 +270,7 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
       for (size_t j = 0; j < i; ++j)
         captured.push_back("f.vals[" + std::to_string(j) + "]");
       captured.push_back("val");
-      std::string push = "k.emplace_back(" + contName + "::K" +
+      std::string push = "__cps_k.emplace_back(" + contName + "::K" +
                          std::to_string(i + 1) + ", ";
       push += "std::vector<" + Ctx.RetType + ">{";
       for (size_t j = 0; j < captured.size(); ++j) {
@@ -308,7 +308,7 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   IRBuilder::add(drainBody.get(), std::move(sw));
 
   IRBuilder::add(loopBody.get(),
-                 IRBuilder::while_(IRExpr("!k.empty()"),
+                 IRBuilder::while_(IRExpr("!__cps_k.empty()"),
                                    std::move(drainBody)));
   IRBuilder::add(loopBody.get(), IRBuilder::ret(IRExpr("val")));
 
@@ -317,14 +317,6 @@ CpsResult DefunctionalizedRule::apply(const FunctionDecl *FD,
   b.function(sig, std::move(body));
 
   return PrintGeneratedUnit(b.unit);
-}
-
-int DefunctionalizedRule::cost() const {
-  return RuleCatalog::Defunctionalized.Cost;
-}
-
-const char *DefunctionalizedRule::name() const {
-  return RuleCatalog::Defunctionalized.Name;
 }
 
 } // namespace cps

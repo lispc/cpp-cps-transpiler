@@ -99,10 +99,8 @@ CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
     auto earlyBlk = IRBuilder::block();
     std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>> branches;
     for (const auto &bc : BA.BaseCases) {
-      std::string condStr =
-          bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
-      std::string valStr =
-          bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+      std::string condStr = PrintBaseCaseCond(bc, Ctx.ASTCtx);
+      std::string valStr = PrintBaseCaseValue(bc, Ctx.ASTCtx);
       auto thenBlk = IRBuilder::block();
       IRBuilder::add(thenBlk.get(), IRBuilder::ret(IRExpr(valStr)));
       branches.emplace_back(std::move(condStr), std::move(thenBlk));
@@ -157,9 +155,5 @@ CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
 }
-
-int TuplingRule::cost() const { return RuleCatalog::Tupling.Cost; }
-
-const char *TuplingRule::name() const { return RuleCatalog::Tupling.Name; }
 
 } // namespace cps

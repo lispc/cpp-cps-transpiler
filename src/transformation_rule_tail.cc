@@ -15,6 +15,12 @@ using namespace clang;
 
 bool TailRecursionRule::applies(const FunctionDecl *FD, const BodyAnalysis &BA,
                                 const GenContext &Ctx) const {
+  // apply() consumes BA (base cases, middle statements, the recursive call).
+  // When AnalyzeBody failed, BA is empty and apply() would silently emit an
+  // infinite loop with no base case and no parameter update.
+  if (!BA.IsRecursive)
+    return false;
+
   std::vector<const CallExpr *> recCalls;
   std::function<void(const Stmt *)> collect = [&](const Stmt *S) {
     if (!S)
@@ -42,8 +48,8 @@ CpsResult TailRecursionRule::apply(const FunctionDecl *FD,
                                      const BodyAnalysis &BA,
                                      GenContext &Ctx) const {
   IRBuilder b;
-  b.raw("// === Generated tail-recursion optimized code for function: " +
-        Ctx.FuncName + " ===\n\n");
+  b.comment("=== Generated tail-recursion optimized code for function: " +
+            Ctx.FuncName + " ===");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   auto body = IRBuilder::block();
@@ -69,12 +75,6 @@ CpsResult TailRecursionRule::apply(const FunctionDecl *FD,
   b.function(sig, std::move(body));
 
   return PrintGeneratedUnit(b.unit);
-}
-
-int TailRecursionRule::cost() const { return RuleCatalog::TailRecursion.Cost; }
-
-const char *TailRecursionRule::name() const {
-  return RuleCatalog::TailRecursion.Name;
 }
 
 } // namespace cps

@@ -218,6 +218,14 @@ public:
   // Convenience: add a statement to a block.
   static IRBlock &add(IRBlock *blk, std::unique_ptr<IRStmt> s);
 
+  // Convenience: append an expression statement (the IR printer appends the
+  // semicolon), a raw statement (text must carry its own semicolons), or a
+  // `type name = init;` variable declaration to a block.
+  static IRBlock &addExpr(IRBlock *blk, const std::string &e);
+  static IRBlock &addRaw(IRBlock *blk, const std::string &text);
+  static IRBlock &addVar(IRBlock *blk, const std::string &type,
+                         const std::string &name, const std::string &init);
+
   static std::unique_ptr<IRIf>
   if_(IRExpr cond, std::unique_ptr<IRStmt> thenBranch,
       std::unique_ptr<IRStmt> elseBranch = nullptr);

@@ -147,7 +147,6 @@ CpsResult GenerateCPS(const FunctionDecl *FD,
     Ctx.ParamDeclSet.insert(PVD);
     std::string pname = PVD->getNameAsString();
     Ctx.ParamNames.push_back(pname);
-    Ctx.ParamNameSet.insert(pname);
   }
 
   bool isVoid = FD->getReturnType()->isVoidType();
@@ -156,22 +155,22 @@ CpsResult GenerateCPS(const FunctionDecl *FD,
       AnalyzeBody(FD->getBody(), BA, Ctx.ASTCtx, Ctx.FuncName, isVoid);
 
   auto rules = CreateDefaultRules();
-  const TransformationRule *bestRule = nullptr;
-  for (const auto &rule : rules) {
+  const RuleEntry *bestRule = nullptr;
+  for (const auto &entry : rules) {
     if (!Ctx.ForceRule.empty() &&
-        std::string(rule->name()) != Ctx.ForceRule) {
+        std::string(entry.Info->Name) != Ctx.ForceRule) {
       continue;
     }
-    if (rule->applies(FD, BA, Ctx)) {
-      if (!bestRule || rule->cost() < bestRule->cost())
-        bestRule = rule.get();
+    if (entry.Rule->applies(FD, BA, Ctx)) {
+      if (!bestRule || entry.Info->Cost < bestRule->Info->Cost)
+        bestRule = &entry;
     }
   }
 
   if (Ctx.ExplainSelection) {
     if (bestRule) {
       llvm::outs() << "[Rule selection] " << Ctx.FuncName << " -> "
-                   << bestRule->name() << "\n";
+                   << bestRule->Info->Name << "\n";
     } else {
       llvm::outs() << "[Rule selection] " << Ctx.FuncName
                    << " -> no applicable rule\n";
@@ -179,7 +178,7 @@ CpsResult GenerateCPS(const FunctionDecl *FD,
   }
 
   if (bestRule)
-    return bestRule->apply(FD, BA, Ctx);
+    return bestRule->Rule->apply(FD, BA, Ctx);
 
   if (!bodyAnalyzed) {
     return MakeError(CpsErrorCode::UnsupportedBodyShape,

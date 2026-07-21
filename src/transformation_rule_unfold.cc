@@ -215,8 +215,4 @@ CpsResult UnfoldRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   return PrintGeneratedUnit(b.unit);
 }
 
-int UnfoldRule::cost() const { return RuleCatalog::Unfold.Cost; }
-
-const char *UnfoldRule::name() const { return RuleCatalog::Unfold.Name; }
-
 } // namespace cps

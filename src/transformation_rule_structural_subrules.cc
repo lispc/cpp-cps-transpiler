@@ -28,34 +28,11 @@ bool CommonStructuralApplies(const FunctionDecl *FD, const GenContext &Ctx) {
   return true;
 }
 
-// Small local conveniences over IRBuilder for the leaf statements these
-// rules emit.
-
-void AddStmt(IRBlock *blk, std::unique_ptr<IRStmt> s) {
-  IRBuilder::add(blk, std::move(s));
-}
-
-// Add an expression statement (the IR printer appends the semicolon).
-void EmitExpr(IRBlock *blk, const std::string &e) {
-  AddStmt(blk, IRBuilder::expr(IRExpr(e)));
-}
-
-// Add a raw statement line; the text must carry its own semicolons.
-void EmitRaw(IRBlock *blk, const std::string &text) {
-  AddStmt(blk, IRBuilder::rawStmt(text));
-}
-
-// Add a `type name = init;` variable declaration.
-void EmitVar(IRBlock *blk, const std::string &type, const std::string &name,
-             const std::string &init) {
-  AddStmt(blk, IRBuilder::var(type, name, IRExpr(init)));
-}
-
-// Build a local `struct Frame { ... };` definition from (type, name) fields.
+// Build a local `struct __cps_Frame { ... };` definition from (type, name) fields.
 std::unique_ptr<IRLocalStruct>
 FrameStruct(std::vector<std::pair<std::string, std::string>> fields) {
   IRStructData data;
-  data.name = "Frame";
+  data.name = "__cps_Frame";
   for (auto &f : fields)
     data.fields.emplace_back(std::move(f.first), std::move(f.second));
   return IRBuilder::localStruct(std::move(data));
@@ -103,44 +80,44 @@ CpsResult IsInTailPositionRule::apply(
   std::string targetName = FD->getParamDecl(1)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"},
+  IRBuilder::add(body.get(), FrameStruct({{"const Stmt *", "S"},
                                    {"int", "state"},
                                    {"bool", "saved"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(), "stack.push_back({" + sName + ", 0, false})");
-  EmitVar(body.get(), Ctx.RetType, "ret", "false");
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + sName + ", 0, false})");
+  IRBuilder::addVar(body.get(), Ctx.RetType, "__cps_ret", "false");
 
   auto w = IRBuilder::block();
-  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  IRBuilder::addVar(w.get(), "__cps_Frame &", "f", "__cps_stack.back()");
   auto sw = IRBuilder::switch_(IRExpr("f.state"));
   {
     auto c0 = IRBuilder::block();
-    EmitVar(c0.get(), "const Stmt *", sName, "f.S");
-    EmitRaw(c0.get(),
-            "if (!" + sName + ") { ret = false; stack.pop_back(); break; }");
+    IRBuilder::addVar(c0.get(), "const Stmt *", sName, "f.S");
+    IRBuilder::addRaw(c0.get(),
+            "if (!" + sName + ") { __cps_ret = false; __cps_stack.pop_back(); break; }");
     {
       auto rsBlk = IRBuilder::block();
-      EmitVar(rsBlk.get(), "const Expr *", "E", "RS->getRetValue()");
+      IRBuilder::addVar(rsBlk.get(), "const Expr *", "E", "RS->getRetValue()");
       {
         auto ceBlk = IRBuilder::block();
         {
           auto calleeBlk = IRBuilder::block();
-          EmitExpr(calleeBlk.get(), "ret = Callee->getNameAsString() == " +
+          IRBuilder::addExpr(calleeBlk.get(), "__cps_ret = Callee->getNameAsString() == " +
                                         targetName + "->getNameAsString()");
-          EmitExpr(calleeBlk.get(), "stack.pop_back()");
-          AddStmt(calleeBlk.get(), IRBuilder::break_());
-          AddStmt(ceBlk.get(),
+          IRBuilder::addExpr(calleeBlk.get(), "__cps_stack.pop_back()");
+          IRBuilder::add(calleeBlk.get(), IRBuilder::break_());
+          IRBuilder::add(ceBlk.get(),
                   IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
                                         "CE->getDirectCallee()"),
                                  std::move(calleeBlk)));
         }
-        AddStmt(rsBlk.get(),
+        IRBuilder::add(rsBlk.get(),
                 IRBuilder::if_(
                     IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(E)"),
                     std::move(ceBlk)));
       }
-      EmitRaw(rsBlk.get(), "ret = false; stack.pop_back(); break;");
-      AddStmt(c0.get(),
+      IRBuilder::addRaw(rsBlk.get(), "__cps_ret = false; __cps_stack.pop_back(); break;");
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
                                     "dyn_cast<ReturnStmt>(" +
                                     sName + ")"),
@@ -154,94 +131,86 @@ CpsResult IsInTailPositionRule::apply(
           auto boBlk = IRBuilder::block();
           {
             auto opBlk = IRBuilder::block();
-            EmitRaw(opBlk.get(), "f.state = 1; stack.push_back({IS->getThen(), "
+            IRBuilder::addRaw(opBlk.get(), "f.state = 1; __cps_stack.push_back({IS->getThen(), "
                                  "0, false}); break;");
-            AddStmt(boBlk.get(),
+            IRBuilder::add(boBlk.get(),
                     IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LAnd || "
                                           "BO->getOpcode() == BO_LOr"),
                                    std::move(opBlk)));
           }
-          AddStmt(condBlk.get(),
+          IRBuilder::add(condBlk.get(),
                   IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
                                         "dyn_cast<BinaryOperator>(Cond)"),
                                  std::move(boBlk)));
         }
-        AddStmt(isBlk.get(),
+        IRBuilder::add(isBlk.get(),
                 IRBuilder::if_(IRExpr("const Expr *Cond = IS->getCond()"),
                                std::move(condBlk)));
       }
-      EmitRaw(isBlk.get(), "f.state = 2; stack.push_back({IS->getThen(), 0, "
+      IRBuilder::addRaw(isBlk.get(), "f.state = 2; __cps_stack.push_back({IS->getThen(), 0, "
                            "false}); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(
                   IRExpr("const IfStmt *IS = dyn_cast<IfStmt>(" + sName + ")"),
                   std::move(isBlk)));
     }
     {
       auto csBlk = IRBuilder::block();
-      EmitRaw(csBlk.get(), "if (CS->body_empty()) { ret = false; "
-                           "stack.pop_back(); break; }");
-      EmitRaw(csBlk.get(), "f.state = 5; stack.push_back({CS->body_back(), 0, "
+      IRBuilder::addRaw(csBlk.get(), "if (CS->body_empty()) { __cps_ret = false; "
+                           "__cps_stack.pop_back(); break; }");
+      IRBuilder::addRaw(csBlk.get(), "f.state = 5; __cps_stack.push_back({CS->body_back(), 0, "
                            "false}); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
                                     "dyn_cast<CompoundStmt>(" +
                                     sName + ")"),
                              std::move(csBlk)));
     }
-    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::addRaw(c0.get(), "__cps_ret = false; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
   }
   {
     auto c1 = IRBuilder::block();
-    EmitVar(c1.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
+    IRBuilder::addVar(c1.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
     auto thenBlk = IRBuilder::block();
-    EmitRaw(thenBlk.get(),
-            "f.state = 4; stack.push_back({IS->getElse(), 0, false});");
+    IRBuilder::addRaw(thenBlk.get(),
+            "f.state = 4; __cps_stack.push_back({IS->getElse(), 0, false});");
     auto elseBlk = IRBuilder::block();
-    EmitRaw(elseBlk.get(), "ret = false; stack.pop_back();");
-    AddStmt(c1.get(), IRBuilder::if_(IRExpr("ret"), std::move(thenBlk),
+    IRBuilder::addRaw(elseBlk.get(), "__cps_ret = false; __cps_stack.pop_back();");
+    IRBuilder::add(c1.get(), IRBuilder::if_(IRExpr("__cps_ret"), std::move(thenBlk),
                                      std::move(elseBlk)));
-    AddStmt(c1.get(), IRBuilder::break_());
+    IRBuilder::add(c1.get(), IRBuilder::break_());
     IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
   }
   {
     auto c2 = IRBuilder::block();
-    EmitVar(c2.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
-    EmitRaw(c2.get(), "if (!ret) { stack.pop_back(); break; }");
-    EmitRaw(c2.get(), "f.saved = ret; f.state = 3; "
-                      "stack.push_back({IS->getElse(), 0, false}); break;");
+    IRBuilder::addVar(c2.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
+    IRBuilder::addRaw(c2.get(), "if (!__cps_ret) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addRaw(c2.get(), "f.saved = __cps_ret; f.state = 3; "
+                      "__cps_stack.push_back({IS->getElse(), 0, false}); break;");
     IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
   }
   {
     auto c3 = IRBuilder::block();
-    EmitRaw(c3.get(), "ret = f.saved && ret; stack.pop_back(); break;");
+    IRBuilder::addRaw(c3.get(), "__cps_ret = f.saved && __cps_ret; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
   }
   {
     auto c4 = IRBuilder::block();
-    EmitRaw(c4.get(), "stack.pop_back(); break;");
+    IRBuilder::addRaw(c4.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"4"}, std::move(c4));
   }
   {
     auto c5 = IRBuilder::block();
-    EmitRaw(c5.get(), "stack.pop_back(); break;");
+    IRBuilder::addRaw(c5.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"5"}, std::move(c5));
   }
-  AddStmt(w.get(), std::move(sw));
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  IRBuilder::add(w.get(), std::move(sw));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("__cps_ret")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int IsInTailPositionRule::cost() const {
-  return RuleCatalog::IsInTailPosition.Cost;
-}
-
-const char *IsInTailPositionRule::name() const {
-  return RuleCatalog::IsInTailPosition.Name;
 }
 
 bool IsInTailPositionExprRule::applies(
@@ -289,27 +258,27 @@ CpsResult IsInTailPositionExprRule::apply(
   std::string sName = FD->getParamDecl(1)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+  IRBuilder::add(body.get(), FrameStruct({{"const Expr *", "E"},
                                    {"const Stmt *", "S"},
                                    {"int", "state"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(), "stack.push_back({" + eName + ", " + sName + ", 0})");
-  EmitVar(body.get(), Ctx.RetType, "ret", "false");
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + eName + ", " + sName + ", 0})");
+  IRBuilder::addVar(body.get(), Ctx.RetType, "__cps_ret", "false");
 
   auto w = IRBuilder::block();
-  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  IRBuilder::addVar(w.get(), "__cps_Frame &", "f", "__cps_stack.back()");
   auto sw = IRBuilder::switch_(IRExpr("f.state"));
   {
     auto c0 = IRBuilder::block();
-    EmitVar(c0.get(), "const Expr *", eName, "f.E");
-    EmitVar(c0.get(), "const Stmt *", sName, "f.S");
-    EmitRaw(c0.get(), "if (!" + eName + " || !" + sName +
-                          ") { ret = false; stack.pop_back(); break; }");
+    IRBuilder::addVar(c0.get(), "const Expr *", eName, "f.E");
+    IRBuilder::addVar(c0.get(), "const Stmt *", sName, "f.S");
+    IRBuilder::addRaw(c0.get(), "if (!" + eName + " || !" + sName +
+                          ") { __cps_ret = false; __cps_stack.pop_back(); break; }");
     {
       auto rsBlk = IRBuilder::block();
-      EmitExpr(rsBlk.get(), "ret = RS->getRetValue() == " + eName);
-      EmitRaw(rsBlk.get(), "stack.pop_back(); break;");
-      AddStmt(c0.get(),
+      IRBuilder::addExpr(rsBlk.get(), "__cps_ret = RS->getRetValue() == " + eName);
+      IRBuilder::addRaw(rsBlk.get(), "__cps_stack.pop_back(); break;");
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
                                     "dyn_cast<ReturnStmt>(" +
                                     sName + ")"),
@@ -317,68 +286,60 @@ CpsResult IsInTailPositionExprRule::apply(
     }
     {
       auto esBlk = IRBuilder::block();
-      EmitExpr(esBlk.get(), "ret = ExprS == " + eName);
-      EmitRaw(esBlk.get(), "stack.pop_back(); break;");
-      AddStmt(c0.get(),
+      IRBuilder::addExpr(esBlk.get(), "__cps_ret = ExprS == " + eName);
+      IRBuilder::addRaw(esBlk.get(), "__cps_stack.pop_back(); break;");
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(
                   IRExpr("const Expr *ExprS = dyn_cast<Expr>(" + sName + ")"),
                   std::move(esBlk)));
     }
     {
       auto ifBlk = IRBuilder::block();
-      EmitRaw(ifBlk.get(), "f.state = 1; stack.push_back({" + eName +
+      IRBuilder::addRaw(ifBlk.get(), "f.state = 1; __cps_stack.push_back({" + eName +
                                ", IfS->getThen(), 0}); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(
                   IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")"),
                   std::move(ifBlk)));
     }
     {
       auto csBlk = IRBuilder::block();
-      EmitRaw(csBlk.get(), "if (CS->body_empty()) { ret = false; "
-                           "stack.pop_back(); break; }");
-      EmitVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
-      AddStmt(csBlk.get(),
+      IRBuilder::addRaw(csBlk.get(), "if (CS->body_empty()) { __cps_ret = false; "
+                           "__cps_stack.pop_back(); break; }");
+      IRBuilder::addVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
+      IRBuilder::add(csBlk.get(),
               IRBuilder::for_("const Stmt *Child : CS->body()", IRExpr(""), "",
                               IRBuilder::expr(IRExpr("Last = Child"))));
-      EmitRaw(csBlk.get(), "f.state = 2; stack.push_back({" + eName +
+      IRBuilder::addRaw(csBlk.get(), "f.state = 2; __cps_stack.push_back({" + eName +
                                ", Last, 0}); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
                                     "dyn_cast<CompoundStmt>(" +
                                     sName + ")"),
                              std::move(csBlk)));
     }
-    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::addRaw(c0.get(), "__cps_ret = false; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
   }
   {
     auto c1 = IRBuilder::block();
-    EmitRaw(c1.get(), "if (ret) { stack.pop_back(); break; }");
-    EmitVar(c1.get(), "const IfStmt *", "IfS", "dyn_cast<IfStmt>(f.S)");
-    EmitRaw(c1.get(),
-            "f.state = 2; stack.push_back({f.E, IfS->getElse(), 0}); break;");
+    IRBuilder::addRaw(c1.get(), "if (__cps_ret) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addVar(c1.get(), "const IfStmt *", "IfS", "dyn_cast<IfStmt>(f.S)");
+    IRBuilder::addRaw(c1.get(),
+            "f.state = 2; __cps_stack.push_back({f.E, IfS->getElse(), 0}); break;");
     IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
   }
   {
     auto c2 = IRBuilder::block();
-    EmitRaw(c2.get(), "stack.pop_back(); break;");
+    IRBuilder::addRaw(c2.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
   }
-  AddStmt(w.get(), std::move(sw));
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  IRBuilder::add(w.get(), std::move(sw));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("__cps_ret")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int IsInTailPositionExprRule::cost() const {
-  return RuleCatalog::IsInTailPositionExpr.Cost;
-}
-
-const char *IsInTailPositionExprRule::name() const {
-  return RuleCatalog::IsInTailPositionExpr.Name;
 }
 
 bool IsPureExprIgnoringRecursiveCallsRule::applies(
@@ -429,61 +390,61 @@ CpsResult IsPureExprIgnoringRecursiveCallsRule::apply(
   std::string funcName = FD->getParamDecl(1)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+  IRBuilder::add(body.get(), FrameStruct({{"const Expr *", "E"},
                                    {"int", "state"},
                                    {"unsigned", "count"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  AddStmt(body.get(), IRBuilder::var("std::vector<bool>", "values"));
-  EmitExpr(body.get(), "stack.push_back({" + eName + ", 0, 0})");
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<bool>", "__cps_values"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + eName + ", 0, 0})");
 
   auto w = IRBuilder::block();
-  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  IRBuilder::addVar(w.get(), "__cps_Frame &", "f", "__cps_stack.back()");
   auto sw = IRBuilder::switch_(IRExpr("f.state"));
   {
     auto c0 = IRBuilder::block();
-    EmitVar(c0.get(), "const Expr *", eName, "f.E");
-    EmitRaw(c0.get(), "if (!" + eName +
-                          ") { values.push_back(true); stack.pop_back(); "
+    IRBuilder::addVar(c0.get(), "const Expr *", eName, "f.E");
+    IRBuilder::addRaw(c0.get(), "if (!" + eName +
+                          ") { __cps_values.push_back(true); __cps_stack.pop_back(); "
                           "break; }");
-    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    IRBuilder::addExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
     {
       auto ceBlk = IRBuilder::block();
       {
         auto calleeBlk = IRBuilder::block();
         {
           auto matchBlk = IRBuilder::block();
-          EmitRaw(matchBlk.get(),
-                  "values.push_back(true); stack.pop_back(); break;");
-          AddStmt(calleeBlk.get(),
+          IRBuilder::addRaw(matchBlk.get(),
+                  "__cps_values.push_back(true); __cps_stack.pop_back(); break;");
+          IRBuilder::add(calleeBlk.get(),
                   IRBuilder::if_(
                       IRExpr("Callee->getNameAsString() == " + funcName),
                       std::move(matchBlk)));
         }
         {
           auto pureBlk = IRBuilder::block();
-          EmitVar(pureBlk.get(), "unsigned", "n", "CE->getNumArgs()");
-          EmitExpr(pureBlk.get(), "f.count = n");
-          EmitRaw(pureBlk.get(), "if (n == 0) { values.push_back(true); "
-                                 "stack.pop_back(); break; }");
-          EmitExpr(pureBlk.get(), "f.state = 1");
-          AddStmt(pureBlk.get(),
+          IRBuilder::addVar(pureBlk.get(), "unsigned", "n", "CE->getNumArgs()");
+          IRBuilder::addExpr(pureBlk.get(), "f.count = n");
+          IRBuilder::addRaw(pureBlk.get(), "if (n == 0) { __cps_values.push_back(true); "
+                                 "__cps_stack.pop_back(); break; }");
+          IRBuilder::addExpr(pureBlk.get(), "f.state = 1");
+          IRBuilder::add(pureBlk.get(),
                   IRBuilder::for_("int i = static_cast<int>(n) - 1",
                                   IRExpr("i >= 0"), "--i",
                                   IRBuilder::expr(IRExpr(
-                                      "stack.push_back({CE->getArg(i), 0, 0})"))));
-          AddStmt(pureBlk.get(), IRBuilder::break_());
-          AddStmt(calleeBlk.get(),
+                                      "__cps_stack.push_back({CE->getArg(i), 0, 0})"))));
+          IRBuilder::add(pureBlk.get(), IRBuilder::break_());
+          IRBuilder::add(calleeBlk.get(),
                   IRBuilder::if_(IRExpr("IsKnownPureFunction("
                                         "Callee->getNameAsString())"),
                                  std::move(pureBlk)));
         }
-        AddStmt(ceBlk.get(),
+        IRBuilder::add(ceBlk.get(),
                 IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
                                       "CE->getDirectCallee()"),
                                std::move(calleeBlk)));
       }
-      EmitRaw(ceBlk.get(), "values.push_back(false); stack.pop_back(); break;");
-      AddStmt(c0.get(),
+      IRBuilder::addRaw(ceBlk.get(), "__cps_values.push_back(false); __cps_stack.pop_back(); break;");
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(" +
                                     eName + ")"),
                              std::move(ceBlk)));
@@ -492,18 +453,18 @@ CpsResult IsPureExprIgnoringRecursiveCallsRule::apply(
       auto boBlk = IRBuilder::block();
       {
         auto assignBlk = IRBuilder::block();
-        EmitRaw(assignBlk.get(),
-                "values.push_back(false); stack.pop_back(); break;");
-        AddStmt(boBlk.get(),
+        IRBuilder::addRaw(assignBlk.get(),
+                "__cps_values.push_back(false); __cps_stack.pop_back(); break;");
+        IRBuilder::add(boBlk.get(),
                 IRBuilder::if_(IRExpr("BO->isAssignmentOp() || "
                                       "BO->getOpcode() == BO_Comma"),
                                std::move(assignBlk)));
       }
-      EmitExpr(boBlk.get(), "f.state = 2");
-      EmitExpr(boBlk.get(), "stack.push_back({BO->getRHS(), 0, 0})");
-      EmitExpr(boBlk.get(), "stack.push_back({BO->getLHS(), 0, 0})");
-      AddStmt(boBlk.get(), IRBuilder::break_());
-      AddStmt(c0.get(),
+      IRBuilder::addExpr(boBlk.get(), "f.state = 2");
+      IRBuilder::addExpr(boBlk.get(), "__cps_stack.push_back({BO->getRHS(), 0, 0})");
+      IRBuilder::addExpr(boBlk.get(), "__cps_stack.push_back({BO->getLHS(), 0, 0})");
+      IRBuilder::add(boBlk.get(), IRBuilder::break_());
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
                                     "dyn_cast<BinaryOperator>(" +
                                     eName + ")"),
@@ -513,90 +474,82 @@ CpsResult IsPureExprIgnoringRecursiveCallsRule::apply(
       auto uoBlk = IRBuilder::block();
       {
         auto incBlk = IRBuilder::block();
-        EmitRaw(incBlk.get(),
-                "values.push_back(false); stack.pop_back(); break;");
-        AddStmt(uoBlk.get(),
+        IRBuilder::addRaw(incBlk.get(),
+                "__cps_values.push_back(false); __cps_stack.pop_back(); break;");
+        IRBuilder::add(uoBlk.get(),
                 IRBuilder::if_(IRExpr("UO->isIncrementDecrementOp()"),
                                std::move(incBlk)));
       }
-      EmitExpr(uoBlk.get(), "f.state = 3");
-      EmitExpr(uoBlk.get(), "stack.push_back({UO->getSubExpr(), 0, 0})");
-      AddStmt(uoBlk.get(), IRBuilder::break_());
-      AddStmt(c0.get(),
+      IRBuilder::addExpr(uoBlk.get(), "f.state = 3");
+      IRBuilder::addExpr(uoBlk.get(), "__cps_stack.push_back({UO->getSubExpr(), 0, 0})");
+      IRBuilder::add(uoBlk.get(), IRBuilder::break_());
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
                                     "dyn_cast<UnaryOperator>(" +
                                     eName + ")"),
                              std::move(uoBlk)));
     }
-    AddStmt(c0.get(),
+    IRBuilder::add(c0.get(),
             IRBuilder::var("std::vector<const Expr *>", "__cps_children"));
     {
       auto childLoopBlk = IRBuilder::block();
-      AddStmt(childLoopBlk.get(),
+      IRBuilder::add(childLoopBlk.get(),
               IRBuilder::if_(
                   IRExpr("const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)"),
                   IRBuilder::expr(IRExpr("__cps_children.push_back(ChildExpr)"))));
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::for_("const Stmt *Child : " + eName + "->children()",
                               IRExpr(""), "", std::move(childLoopBlk)));
     }
-    EmitExpr(c0.get(),
+    IRBuilder::addExpr(c0.get(),
              "f.count = static_cast<unsigned>(__cps_children.size())");
-    EmitRaw(c0.get(), "if (f.count == 0) { values.push_back(true); "
-                      "stack.pop_back(); break; }");
-    EmitExpr(c0.get(), "f.state = 4");
-    AddStmt(c0.get(),
+    IRBuilder::addRaw(c0.get(), "if (f.count == 0) { __cps_values.push_back(true); "
+                      "__cps_stack.pop_back(); break; }");
+    IRBuilder::addExpr(c0.get(), "f.state = 4");
+    IRBuilder::add(c0.get(),
             IRBuilder::for_("auto it = __cps_children.rbegin()",
                             IRExpr("it != __cps_children.rend()"), "++it",
-                            IRBuilder::expr(IRExpr("stack.push_back({*it, 0, 0})"))));
-    AddStmt(c0.get(), IRBuilder::break_());
+                            IRBuilder::expr(IRExpr("__cps_stack.push_back({*it, 0, 0})"))));
+    IRBuilder::add(c0.get(), IRBuilder::break_());
     IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
   }
   for (const char *lbl : {"1", "4"}) {
     auto agg = IRBuilder::block();
-    EmitVar(agg.get(), "bool", "res", "true");
+    IRBuilder::addVar(agg.get(), "bool", "res", "true");
     {
       auto loopBlk = IRBuilder::block();
-      EmitRaw(loopBlk.get(), "bool v = values.back(); values.pop_back();");
-      EmitExpr(loopBlk.get(), "res = res && v");
-      AddStmt(agg.get(),
+      IRBuilder::addRaw(loopBlk.get(), "bool v = __cps_values.back(); __cps_values.pop_back();");
+      IRBuilder::addExpr(loopBlk.get(), "res = res && v");
+      IRBuilder::add(agg.get(),
               IRBuilder::for_("unsigned i = 0", IRExpr("i < f.count"), "++i",
                               std::move(loopBlk)));
     }
-    EmitExpr(agg.get(), "values.push_back(res)");
-    EmitRaw(agg.get(), "stack.pop_back(); break;");
+    IRBuilder::addExpr(agg.get(), "__cps_values.push_back(res)");
+    IRBuilder::addRaw(agg.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {lbl}, std::move(agg));
   }
   {
     auto c2 = IRBuilder::block();
-    EmitRaw(c2.get(), "bool rhs = values.back(); values.pop_back();");
-    EmitRaw(c2.get(), "bool lhs = values.back(); values.pop_back();");
-    EmitExpr(c2.get(), "values.push_back(lhs && rhs)");
-    EmitRaw(c2.get(), "stack.pop_back(); break;");
+    IRBuilder::addRaw(c2.get(), "bool rhs = __cps_values.back(); __cps_values.pop_back();");
+    IRBuilder::addRaw(c2.get(), "bool lhs = __cps_values.back(); __cps_values.pop_back();");
+    IRBuilder::addExpr(c2.get(), "__cps_values.push_back(lhs && rhs)");
+    IRBuilder::addRaw(c2.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
   }
   {
     auto c3 = IRBuilder::block();
-    EmitRaw(c3.get(), "bool v = values.back(); values.pop_back();");
-    EmitExpr(c3.get(), "values.push_back(v)");
-    EmitRaw(c3.get(), "stack.pop_back(); break;");
+    IRBuilder::addRaw(c3.get(), "bool v = __cps_values.back(); __cps_values.pop_back();");
+    IRBuilder::addExpr(c3.get(), "__cps_values.push_back(v)");
+    IRBuilder::addRaw(c3.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
   }
-  AddStmt(w.get(), std::move(sw));
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(),
-          IRBuilder::ret(IRExpr("values.empty() ? true : values.back()")));
+  IRBuilder::add(w.get(), std::move(sw));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(),
+          IRBuilder::ret(IRExpr("__cps_values.empty() ? true : __cps_values.back()")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int IsPureExprIgnoringRecursiveCallsRule::cost() const {
-  return RuleCatalog::IsPureExprIgnoringRecursiveCalls.Cost;
-}
-
-const char *IsPureExprIgnoringRecursiveCallsRule::name() const {
-  return RuleCatalog::IsPureExprIgnoringRecursiveCalls.Name;
 }
 
 bool IsReturnOrIfReturnOrSwitchRule::applies(
@@ -638,46 +591,38 @@ CpsResult IsReturnOrIfReturnOrSwitchRule::apply(
   std::string sName = FD->getParamDecl(0)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(), "stack.push_back({" + sName + "})");
+  IRBuilder::add(body.get(), FrameStruct({{"const Stmt *", "S"}}));
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + sName + "})");
 
   auto w = IRBuilder::block();
-  EmitRaw(w.get(), "Frame f = stack.back(); stack.pop_back();");
-  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<ReturnStmt>(f.S)"),
+  IRBuilder::addRaw(w.get(), "__cps_Frame f = __cps_stack.back(); __cps_stack.pop_back();");
+  IRBuilder::add(w.get(), IRBuilder::if_(IRExpr("isa<ReturnStmt>(f.S)"),
                                   IRBuilder::ret(IRExpr("true"))));
-  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<IfStmt>(f.S)"),
+  IRBuilder::add(w.get(), IRBuilder::if_(IRExpr("isa<IfStmt>(f.S)"),
                                   IRBuilder::ret(IRExpr("true"))));
-  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<SwitchStmt>(f.S)"),
+  IRBuilder::add(w.get(), IRBuilder::if_(IRExpr("isa<SwitchStmt>(f.S)"),
                                   IRBuilder::ret(IRExpr("true"))));
   {
     auto csBlk = IRBuilder::block();
-    AddStmt(csBlk.get(),
+    IRBuilder::add(csBlk.get(),
             IRBuilder::if_(
                 IRExpr("CS->size() == 1"),
                 IRBuilder::expr(
-                    IRExpr("stack.push_back({CS->body_begin()[0]})")),
+                    IRExpr("__cps_stack.push_back({CS->body_begin()[0]})")),
                 IRBuilder::ret(IRExpr("false"))));
     auto elseBlk = IRBuilder::block();
-    AddStmt(elseBlk.get(), IRBuilder::ret(IRExpr("false")));
-    AddStmt(w.get(),
+    IRBuilder::add(elseBlk.get(), IRBuilder::ret(IRExpr("false")));
+    IRBuilder::add(w.get(),
             IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
                                   "dyn_cast<CompoundStmt>(f.S)"),
                            std::move(csBlk), std::move(elseBlk)));
   }
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(), IRBuilder::ret(IRExpr("false")));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("false")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int IsReturnOrIfReturnOrSwitchRule::cost() const {
-  return RuleCatalog::IsReturnOrIfReturnOrSwitch.Cost;
-}
-
-const char *IsReturnOrIfReturnOrSwitchRule::name() const {
-  return RuleCatalog::IsReturnOrIfReturnOrSwitch.Name;
 }
 
 bool UnwrapTrailingStmtRule::applies(
@@ -730,15 +675,15 @@ CpsResult UnwrapTrailingStmtRule::apply(
   auto w = IRBuilder::block();
   {
     auto csBlk = IRBuilder::block();
-    AddStmt(csBlk.get(), IRBuilder::if_(IRExpr("CS->body_empty()"),
+    IRBuilder::add(csBlk.get(), IRBuilder::if_(IRExpr("CS->body_empty()"),
                                         IRBuilder::ret(IRExpr("nullptr"))));
-    EmitVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
-    AddStmt(csBlk.get(),
+    IRBuilder::addVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
+    IRBuilder::add(csBlk.get(),
             IRBuilder::for_("const Stmt *B : CS->body()", IRExpr(""), "",
                             IRBuilder::expr(IRExpr("Last = B"))));
-    EmitExpr(csBlk.get(), sName + " = Last");
-    AddStmt(csBlk.get(), IRBuilder::continue_());
-    AddStmt(w.get(),
+    IRBuilder::addExpr(csBlk.get(), sName + " = Last");
+    IRBuilder::add(csBlk.get(), IRBuilder::continue_());
+    IRBuilder::add(w.get(),
             IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
                                   "dyn_cast<CompoundStmt>(" +
                                   sName + ")"),
@@ -746,27 +691,19 @@ CpsResult UnwrapTrailingStmtRule::apply(
   }
   {
     auto ifBlk = IRBuilder::block();
-    AddStmt(ifBlk.get(), IRBuilder::if_(IRExpr("IfS->getElse()"),
+    IRBuilder::add(ifBlk.get(), IRBuilder::if_(IRExpr("IfS->getElse()"),
                                         IRBuilder::ret(IRExpr(sName))));
-    EmitExpr(ifBlk.get(), sName + " = IfS->getThen()");
-    AddStmt(ifBlk.get(), IRBuilder::continue_());
-    AddStmt(w.get(),
+    IRBuilder::addExpr(ifBlk.get(), sName + " = IfS->getThen()");
+    IRBuilder::add(ifBlk.get(), IRBuilder::continue_());
+    IRBuilder::add(w.get(),
             IRBuilder::if_(
                 IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")"),
                 std::move(ifBlk)));
   }
-  AddStmt(w.get(), IRBuilder::ret(IRExpr(sName)));
-  AddStmt(body.get(), IRBuilder::while_(IRExpr("true"), std::move(w)));
+  IRBuilder::add(w.get(), IRBuilder::ret(IRExpr(sName)));
+  IRBuilder::add(body.get(), IRBuilder::while_(IRExpr("true"), std::move(w)));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int UnwrapTrailingStmtRule::cost() const {
-  return RuleCatalog::UnwrapTrailingStmt.Cost;
-}
-
-const char *UnwrapTrailingStmtRule::name() const {
-  return RuleCatalog::UnwrapTrailingStmt.Name;
 }
 
 bool FlattenIfElseRule::applies(
@@ -826,19 +763,19 @@ CpsResult FlattenIfElseRule::apply(
   std::string ctxName = FD->getParamDecl(2)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(), "stack.push_back({" + sName + "})");
+  IRBuilder::add(body.get(), FrameStruct({{"const Stmt *", "S"}}));
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + sName + "})");
 
   auto w = IRBuilder::block();
-  EmitRaw(w.get(), "Frame f = stack.back(); stack.pop_back();");
-  AddStmt(w.get(),
+  IRBuilder::addRaw(w.get(), "__cps_Frame f = __cps_stack.back(); __cps_stack.pop_back();");
+  IRBuilder::add(w.get(),
           IRBuilder::if_(IRExpr("!f.S"), IRBuilder::continue_()));
   {
     auto ifBlk = IRBuilder::block();
-    EmitVar(ifBlk.get(), "const Expr *", "BaseExpr",
+    IRBuilder::addVar(ifBlk.get(), "const Expr *", "BaseExpr",
             "ExtractReturnExpr(IfS->getThen())");
-    AddStmt(ifBlk.get(),
+    IRBuilder::add(ifBlk.get(),
             IRBuilder::if_(
                 IRExpr("BaseExpr"),
                 IRBuilder::expr(IRExpr(
@@ -846,36 +783,28 @@ CpsResult FlattenIfElseRule::apply(
                     ".BaseCases.push_back(MakeBaseCase(IfS->getCond(), "
                     "BaseExpr, " +
                     ctxName + "))"))));
-    AddStmt(ifBlk.get(),
+    IRBuilder::add(ifBlk.get(),
             IRBuilder::if_(IRExpr("const Stmt *Else = IfS->getElse()"),
-                           IRBuilder::expr(IRExpr("stack.push_back({Else})"))));
-    AddStmt(ifBlk.get(), IRBuilder::continue_());
-    AddStmt(w.get(),
+                           IRBuilder::expr(IRExpr("__cps_stack.push_back({Else})"))));
+    IRBuilder::add(ifBlk.get(), IRBuilder::continue_());
+    IRBuilder::add(w.get(),
             IRBuilder::if_(
                 IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(f.S)"),
                 std::move(ifBlk)));
   }
   {
     auto rsBlk = IRBuilder::block();
-    EmitExpr(rsBlk.get(), baName + ".RecExpr = RS->getRetValue()");
-    EmitExpr(rsBlk.get(), baName + ".IsRecursive = true");
-    AddStmt(w.get(),
+    IRBuilder::addExpr(rsBlk.get(), baName + ".RecExpr = RS->getRetValue()");
+    IRBuilder::addExpr(rsBlk.get(), baName + ".IsRecursive = true");
+    IRBuilder::add(w.get(),
             IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
                                   "dyn_cast<ReturnStmt>(f.S)"),
                            std::move(rsBlk)));
   }
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int FlattenIfElseRule::cost() const {
-  return RuleCatalog::FlattenIfElse.Cost;
-}
-
-const char *FlattenIfElseRule::name() const {
-  return RuleCatalog::FlattenIfElse.Name;
 }
 
 bool EvalConditionRule::applies(
@@ -921,50 +850,50 @@ CpsResult EvalConditionRule::apply(
   std::string vName = FD->getParamDecl(2)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+  IRBuilder::add(body.get(), FrameStruct({{"const Expr *", "E"},
                                    {"int", "state"},
                                    {"EvalResult", "saved"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(),
-           "stack.push_back({" + eName + ", 0, EvalResult::Unknown})");
-  EmitVar(body.get(), Ctx.RetType, "ret", "EvalResult::Unknown");
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(),
+           "__cps_stack.push_back({" + eName + ", 0, EvalResult::Unknown})");
+  IRBuilder::addVar(body.get(), Ctx.RetType, "__cps_ret", "EvalResult::Unknown");
 
   auto w = IRBuilder::block();
-  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  IRBuilder::addVar(w.get(), "__cps_Frame &", "f", "__cps_stack.back()");
   auto sw = IRBuilder::switch_(IRExpr("f.state"));
   {
     auto c0 = IRBuilder::block();
-    EmitVar(c0.get(), "const Expr *", eName, "f.E");
-    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    IRBuilder::addVar(c0.get(), "const Expr *", eName, "f.E");
+    IRBuilder::addExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
     {
       auto boBlk = IRBuilder::block();
       {
         auto landBlk = IRBuilder::block();
-        EmitRaw(landBlk.get(),
-                "f.state = 1; stack.push_back({BO->getLHS(), 0, "
+        IRBuilder::addRaw(landBlk.get(),
+                "f.state = 1; __cps_stack.push_back({BO->getLHS(), 0, "
                 "EvalResult::Unknown}); break;");
-        AddStmt(boBlk.get(),
+        IRBuilder::add(boBlk.get(),
                 IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LAnd"),
                                std::move(landBlk)));
       }
       {
         auto lorBlk = IRBuilder::block();
-        EmitRaw(lorBlk.get(),
-                "f.state = 2; stack.push_back({BO->getLHS(), 0, "
+        IRBuilder::addRaw(lorBlk.get(),
+                "f.state = 2; __cps_stack.push_back({BO->getLHS(), 0, "
                 "EvalResult::Unknown}); break;");
-        AddStmt(boBlk.get(),
+        IRBuilder::add(boBlk.get(),
                 IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LOr"),
                                std::move(lorBlk)));
       }
-      EmitRaw(boBlk.get(), "int lhsVal = 0, rhsVal = 0;");
-      EmitVar(boBlk.get(), "bool", "lhsKnown",
+      IRBuilder::addRaw(boBlk.get(), "int lhsVal = 0, rhsVal = 0;");
+      IRBuilder::addVar(boBlk.get(), "bool", "lhsKnown",
               "ExtractParamOrLiteral(BO->getLHS(), " + pName + ", " + vName +
                   ", lhsVal)");
-      EmitVar(boBlk.get(), "bool", "rhsKnown",
+      IRBuilder::addVar(boBlk.get(), "bool", "rhsKnown",
               "ExtractParamOrLiteral(BO->getRHS(), " + pName + ", " + vName +
                   ", rhsVal)");
-      EmitRaw(boBlk.get(), "if (!lhsKnown || !rhsKnown) { ret = "
-                           "EvalResult::Unknown; stack.pop_back(); break; }");
+      IRBuilder::addRaw(boBlk.get(), "if (!lhsKnown || !rhsKnown) { __cps_ret = "
+                           "EvalResult::Unknown; __cps_stack.pop_back(); break; }");
       auto opSw = IRBuilder::switch_(IRExpr("BO->getOpcode()"));
       const std::pair<const char *, const char *> opCases[] = {
           {"BO_EQ", "=="}, {"BO_NE", "!="}, {"BO_LT", "<"},
@@ -972,21 +901,21 @@ CpsResult EvalConditionRule::apply(
       };
       for (const auto &oc : opCases) {
         auto opBlk = IRBuilder::block();
-        EmitExpr(opBlk.get(), std::string("ret = (lhsVal ") + oc.second +
+        IRBuilder::addExpr(opBlk.get(), std::string("__cps_ret = (lhsVal ") + oc.second +
                                   " rhsVal) ? EvalResult::True : "
                                   "EvalResult::False");
-        AddStmt(opBlk.get(), IRBuilder::break_());
+        IRBuilder::add(opBlk.get(), IRBuilder::break_());
         IRBuilder::case_(opSw.get(), {oc.first}, std::move(opBlk));
       }
       {
         auto defBlk = IRBuilder::block();
-        EmitExpr(defBlk.get(), "ret = EvalResult::Unknown");
-        AddStmt(defBlk.get(), IRBuilder::break_());
+        IRBuilder::addExpr(defBlk.get(), "__cps_ret = EvalResult::Unknown");
+        IRBuilder::add(defBlk.get(), IRBuilder::break_());
         IRBuilder::case_(opSw.get(), {}, std::move(defBlk));
       }
-      AddStmt(boBlk.get(), std::move(opSw));
-      EmitRaw(boBlk.get(), "stack.pop_back(); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(boBlk.get(), std::move(opSw));
+      IRBuilder::addRaw(boBlk.get(), "__cps_stack.pop_back(); break;");
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
                                     "dyn_cast<BinaryOperator>(" +
                                     eName + ")"),
@@ -996,102 +925,94 @@ CpsResult EvalConditionRule::apply(
       auto uoBlk = IRBuilder::block();
       {
         auto lnotBlk = IRBuilder::block();
-        EmitRaw(lnotBlk.get(),
-                "f.state = 3; stack.push_back({UO->getSubExpr(), 0, "
+        IRBuilder::addRaw(lnotBlk.get(),
+                "f.state = 3; __cps_stack.push_back({UO->getSubExpr(), 0, "
                 "EvalResult::Unknown}); break;");
-        AddStmt(uoBlk.get(),
+        IRBuilder::add(uoBlk.get(),
                 IRBuilder::if_(IRExpr("UO->getOpcode() == UO_LNot"),
                                std::move(lnotBlk)));
       }
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
                                     "dyn_cast<UnaryOperator>(" +
                                     eName + ")"),
                              std::move(uoBlk)));
     }
-    EmitRaw(c0.get(),
-            "ret = EvalResult::Unknown; stack.pop_back(); break;");
+    IRBuilder::addRaw(c0.get(),
+            "__cps_ret = EvalResult::Unknown; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
   }
   {
     auto c1 = IRBuilder::block();
-    EmitRaw(c1.get(),
-            "if (ret == EvalResult::False) { stack.pop_back(); break; }");
-    EmitRaw(c1.get(), "f.saved = ret; f.state = 4;");
-    EmitVar(c1.get(), "const BinaryOperator *", "BO",
+    IRBuilder::addRaw(c1.get(),
+            "if (__cps_ret == EvalResult::False) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addRaw(c1.get(), "f.saved = __cps_ret; f.state = 4;");
+    IRBuilder::addVar(c1.get(), "const BinaryOperator *", "BO",
             "dyn_cast<BinaryOperator>(f.E)");
-    EmitRaw(c1.get(),
-            "stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
+    IRBuilder::addRaw(c1.get(),
+            "__cps_stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
     IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
   }
   {
     auto c2 = IRBuilder::block();
-    EmitRaw(c2.get(),
-            "if (ret == EvalResult::True) { stack.pop_back(); break; }");
-    EmitRaw(c2.get(), "f.saved = ret; f.state = 5;");
-    EmitVar(c2.get(), "const BinaryOperator *", "BO",
+    IRBuilder::addRaw(c2.get(),
+            "if (__cps_ret == EvalResult::True) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addRaw(c2.get(), "f.saved = __cps_ret; f.state = 5;");
+    IRBuilder::addVar(c2.get(), "const BinaryOperator *", "BO",
             "dyn_cast<BinaryOperator>(f.E)");
-    EmitRaw(c2.get(),
-            "stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
+    IRBuilder::addRaw(c2.get(),
+            "__cps_stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
     IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
   }
   {
     auto c3 = IRBuilder::block();
-    AddStmt(c3.get(),
+    IRBuilder::add(c3.get(),
             IRBuilder::if_(
-                IRExpr("ret == EvalResult::True"),
-                IRBuilder::expr(IRExpr("ret = EvalResult::False")),
+                IRExpr("__cps_ret == EvalResult::True"),
+                IRBuilder::expr(IRExpr("__cps_ret = EvalResult::False")),
                 IRBuilder::if_(
-                    IRExpr("ret == EvalResult::False"),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::True")),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")))));
-    EmitRaw(c3.get(), "stack.pop_back(); break;");
+                    IRExpr("__cps_ret == EvalResult::False"),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::True")),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::Unknown")))));
+    IRBuilder::addRaw(c3.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
   }
   {
     auto c4 = IRBuilder::block();
-    AddStmt(c4.get(),
+    IRBuilder::add(c4.get(),
             IRBuilder::if_(
                 IRExpr("f.saved == EvalResult::False || "
-                       "ret == EvalResult::False"),
-                IRBuilder::expr(IRExpr("ret = EvalResult::False")),
+                       "__cps_ret == EvalResult::False"),
+                IRBuilder::expr(IRExpr("__cps_ret = EvalResult::False")),
                 IRBuilder::if_(
                     IRExpr("f.saved == EvalResult::Unknown || "
-                           "ret == EvalResult::Unknown"),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::True")))));
-    EmitRaw(c4.get(), "stack.pop_back(); break;");
+                           "__cps_ret == EvalResult::Unknown"),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::Unknown")),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::True")))));
+    IRBuilder::addRaw(c4.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"4"}, std::move(c4));
   }
   {
     auto c5 = IRBuilder::block();
-    AddStmt(c5.get(),
+    IRBuilder::add(c5.get(),
             IRBuilder::if_(
                 IRExpr("f.saved == EvalResult::True || "
-                       "ret == EvalResult::True"),
-                IRBuilder::expr(IRExpr("ret = EvalResult::True")),
+                       "__cps_ret == EvalResult::True"),
+                IRBuilder::expr(IRExpr("__cps_ret = EvalResult::True")),
                 IRBuilder::if_(
                     IRExpr("f.saved == EvalResult::Unknown || "
-                           "ret == EvalResult::Unknown"),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")),
-                    IRBuilder::expr(IRExpr("ret = EvalResult::False")))));
-    EmitRaw(c5.get(), "stack.pop_back(); break;");
+                           "__cps_ret == EvalResult::Unknown"),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::Unknown")),
+                    IRBuilder::expr(IRExpr("__cps_ret = EvalResult::False")))));
+    IRBuilder::addRaw(c5.get(), "__cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"5"}, std::move(c5));
   }
-  AddStmt(w.get(), std::move(sw));
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  IRBuilder::add(w.get(), std::move(sw));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("__cps_ret")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int EvalConditionRule::cost() const {
-  return RuleCatalog::EvalCondition.Cost;
-}
-
-const char *EvalConditionRule::name() const {
-  return RuleCatalog::EvalCondition.Name;
 }
 
 bool ParseLinearTermsRule::applies(
@@ -1144,70 +1065,70 @@ CpsResult ParseLinearTermsRule::apply(
   std::string maxName = FD->getParamDecl(4)->getNameAsString();
 
   auto body = IRBuilder::block();
-  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+  IRBuilder::add(body.get(), FrameStruct({{"const Expr *", "E"},
                                    {"int", "state"},
                                    {"std::size_t", "terms_start"},
                                    {"std::size_t", "rhs_start"},
                                    {"int", "saved_max"}}));
-  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
-  EmitExpr(body.get(), "stack.push_back({" + eName + ", 0, " + termsName +
+  IRBuilder::add(body.get(), IRBuilder::var("std::vector<__cps_Frame>", "__cps_stack"));
+  IRBuilder::addExpr(body.get(), "__cps_stack.push_back({" + eName + ", 0, " + termsName +
                            ".size(), 0, " + maxName + "})");
-  EmitVar(body.get(), Ctx.RetType, "ret", "false");
+  IRBuilder::addVar(body.get(), Ctx.RetType, "__cps_ret", "false");
 
   auto w = IRBuilder::block();
-  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  IRBuilder::addVar(w.get(), "__cps_Frame &", "f", "__cps_stack.back()");
   auto sw = IRBuilder::switch_(IRExpr("f.state"));
   {
     auto c0 = IRBuilder::block();
-    EmitVar(c0.get(), "const Expr *", eName, "f.E");
-    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    IRBuilder::addVar(c0.get(), "const Expr *", eName, "f.E");
+    IRBuilder::addExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
     {
       auto ceBlk = IRBuilder::block();
       {
         auto calleeBlk = IRBuilder::block();
         {
           auto matchBlk = IRBuilder::block();
-          EmitRaw(matchBlk.get(), "if (CE->getNumArgs() != 1) { ret = false; "
-                                  "stack.pop_back(); break; }");
-          EmitVar(matchBlk.get(), "const Expr *", "Arg",
+          IRBuilder::addRaw(matchBlk.get(), "if (CE->getNumArgs() != 1) { __cps_ret = false; "
+                                  "__cps_stack.pop_back(); break; }");
+          IRBuilder::addVar(matchBlk.get(), "const Expr *", "Arg",
                   "CE->getArg(0)->IgnoreParenImpCasts()");
-          EmitVar(matchBlk.get(), "const BinaryOperator *", "BO",
+          IRBuilder::addVar(matchBlk.get(), "const BinaryOperator *", "BO",
                   "dyn_cast<BinaryOperator>(Arg)");
-          EmitRaw(matchBlk.get(), "if (!BO || BO->getOpcode() != BO_Sub) { "
-                                  "ret = false; stack.pop_back(); break; }");
-          EmitVar(matchBlk.get(), "const Expr *", "LHS",
+          IRBuilder::addRaw(matchBlk.get(), "if (!BO || BO->getOpcode() != BO_Sub) { "
+                                  "__cps_ret = false; __cps_stack.pop_back(); break; }");
+          IRBuilder::addVar(matchBlk.get(), "const Expr *", "LHS",
                   "BO->getLHS()->IgnoreParenImpCasts()");
-          EmitVar(matchBlk.get(), "const Expr *", "RHS",
+          IRBuilder::addVar(matchBlk.get(), "const Expr *", "RHS",
                   "BO->getRHS()->IgnoreParenImpCasts()");
-          EmitVar(matchBlk.get(), "const DeclRefExpr *", "DRE",
+          IRBuilder::addVar(matchBlk.get(), "const DeclRefExpr *", "DRE",
                   "dyn_cast<DeclRefExpr>(LHS)");
-          EmitRaw(matchBlk.get(),
+          IRBuilder::addRaw(matchBlk.get(),
                   "if (!DRE || DRE->getDecl()->getNameAsString() != " + pName +
-                      ") { ret = false; stack.pop_back(); break; }");
-          EmitVar(matchBlk.get(), "const IntegerLiteral *", "IL",
+                      ") { __cps_ret = false; __cps_stack.pop_back(); break; }");
+          IRBuilder::addVar(matchBlk.get(), "const IntegerLiteral *", "IL",
                   "dyn_cast<IntegerLiteral>(RHS)");
-          EmitRaw(matchBlk.get(),
-                  "if (!IL) { ret = false; stack.pop_back(); break; }");
-          EmitVar(matchBlk.get(), "int", "c",
+          IRBuilder::addRaw(matchBlk.get(),
+                  "if (!IL) { __cps_ret = false; __cps_stack.pop_back(); break; }");
+          IRBuilder::addVar(matchBlk.get(), "int", "c",
                   "static_cast<int>(IL->getValue().getSExtValue())");
-          EmitRaw(matchBlk.get(),
-                  "if (c <= 0) { ret = false; stack.pop_back(); break; }");
-          EmitExpr(matchBlk.get(), termsName + ".push_back({c, 1, "
+          IRBuilder::addRaw(matchBlk.get(),
+                  "if (c <= 0) { __cps_ret = false; __cps_stack.pop_back(); break; }");
+          IRBuilder::addExpr(matchBlk.get(), termsName + ".push_back({c, 1, "
                                                "const_cast<CallExpr *>(CE)})");
-          EmitExpr(matchBlk.get(),
+          IRBuilder::addExpr(matchBlk.get(),
                    maxName + " = std::max(" + maxName + ", c)");
-          EmitRaw(matchBlk.get(), "ret = true; stack.pop_back(); break;");
-          AddStmt(calleeBlk.get(),
+          IRBuilder::addRaw(matchBlk.get(), "__cps_ret = true; __cps_stack.pop_back(); break;");
+          IRBuilder::add(calleeBlk.get(),
                   IRBuilder::if_(
                       IRExpr("Callee->getNameAsString() == " + funcName),
                       std::move(matchBlk)));
         }
-        AddStmt(ceBlk.get(),
+        IRBuilder::add(ceBlk.get(),
                 IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
                                       "CE->getDirectCallee()"),
                                std::move(calleeBlk)));
       }
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(" +
                                     eName + ")"),
                              std::move(ceBlk)));
@@ -1216,15 +1137,15 @@ CpsResult ParseLinearTermsRule::apply(
       auto uoBlk = IRBuilder::block();
       {
         auto minusBlk = IRBuilder::block();
-        EmitRaw(minusBlk.get(), "f.terms_start = " + termsName +
+        IRBuilder::addRaw(minusBlk.get(), "f.terms_start = " + termsName +
                                     ".size(); f.saved_max = " + maxName + ";");
-        EmitRaw(minusBlk.get(), "f.state = 1; stack.push_back({UO->getSubExpr()"
+        IRBuilder::addRaw(minusBlk.get(), "f.state = 1; __cps_stack.push_back({UO->getSubExpr()"
                                 ", 0, 0, 0, 0}); break;");
-        AddStmt(uoBlk.get(),
+        IRBuilder::add(uoBlk.get(),
                 IRBuilder::if_(IRExpr("UO->getOpcode() == UO_Minus"),
                                std::move(minusBlk)));
       }
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
                                     "dyn_cast<UnaryOperator>(" +
                                     eName + ")"),
@@ -1232,81 +1153,73 @@ CpsResult ParseLinearTermsRule::apply(
     }
     {
       auto boBlk = IRBuilder::block();
-      EmitRaw(boBlk.get(), "if (BO->getOpcode() != BO_Add && "
-                           "BO->getOpcode() != BO_Sub) { ret = false; "
-                           "stack.pop_back(); break; }");
-      EmitRaw(boBlk.get(), "f.terms_start = " + termsName +
+      IRBuilder::addRaw(boBlk.get(), "if (BO->getOpcode() != BO_Add && "
+                           "BO->getOpcode() != BO_Sub) { __cps_ret = false; "
+                           "__cps_stack.pop_back(); break; }");
+      IRBuilder::addRaw(boBlk.get(), "f.terms_start = " + termsName +
                                ".size(); f.saved_max = " + maxName + ";");
-      EmitRaw(boBlk.get(), "f.state = 2; stack.push_back({BO->getLHS(), 0, 0, "
+      IRBuilder::addRaw(boBlk.get(), "f.state = 2; __cps_stack.push_back({BO->getLHS(), 0, 0, "
                            "0, 0}); break;");
-      AddStmt(c0.get(),
+      IRBuilder::add(c0.get(),
               IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
                                     "dyn_cast<BinaryOperator>(" +
                                     eName + ")"),
                              std::move(boBlk)));
     }
-    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::addRaw(c0.get(), "__cps_ret = false; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
   }
   {
     auto c1 = IRBuilder::block();
-    EmitRaw(c1.get(), "if (!ret) { stack.pop_back(); break; }");
-    AddStmt(c1.get(),
+    IRBuilder::addRaw(c1.get(), "if (!__cps_ret) { __cps_stack.pop_back(); break; }");
+    IRBuilder::add(c1.get(),
             IRBuilder::for_("std::size_t i = f.terms_start",
                             IRExpr("i < " + termsName + ".size()"), "++i",
                             IRBuilder::expr(IRExpr(termsName +
                                                    "[i].Sign = -" + termsName +
                                                    "[i].Sign"))));
-    EmitExpr(c1.get(), maxName + " = std::max(f.saved_max, " + maxName + ")");
-    EmitRaw(c1.get(), "ret = true; stack.pop_back(); break;");
+    IRBuilder::addExpr(c1.get(), maxName + " = std::max(f.saved_max, " + maxName + ")");
+    IRBuilder::addRaw(c1.get(), "__cps_ret = true; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
   }
   {
     auto c2 = IRBuilder::block();
-    EmitRaw(c2.get(), "if (!ret) { stack.pop_back(); break; }");
-    EmitExpr(c2.get(), "f.rhs_start = " + termsName + ".size()");
-    EmitVar(c2.get(), "const BinaryOperator *", "BO",
+    IRBuilder::addRaw(c2.get(), "if (!__cps_ret) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addExpr(c2.get(), "f.rhs_start = " + termsName + ".size()");
+    IRBuilder::addVar(c2.get(), "const BinaryOperator *", "BO",
             "dyn_cast<BinaryOperator>(f.E)");
-    EmitRaw(c2.get(), "f.state = 3; stack.push_back({BO->getRHS(), 0, 0, 0, "
+    IRBuilder::addRaw(c2.get(), "f.state = 3; __cps_stack.push_back({BO->getRHS(), 0, 0, 0, "
                       "0}); break;");
     IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
   }
   {
     auto c3 = IRBuilder::block();
-    EmitRaw(c3.get(), "if (!ret) { stack.pop_back(); break; }");
-    EmitVar(c3.get(), "const BinaryOperator *", "BO",
+    IRBuilder::addRaw(c3.get(), "if (!__cps_ret) { __cps_stack.pop_back(); break; }");
+    IRBuilder::addVar(c3.get(), "const BinaryOperator *", "BO",
             "dyn_cast<BinaryOperator>(f.E)");
     {
       auto subBlk = IRBuilder::block();
-      AddStmt(subBlk.get(),
+      IRBuilder::add(subBlk.get(),
               IRBuilder::for_("std::size_t i = f.rhs_start",
                               IRExpr("i < " + termsName + ".size()"), "++i",
                               IRBuilder::expr(IRExpr(termsName +
                                                      "[i].Sign = -" +
                                                      termsName + "[i].Sign"))));
-      AddStmt(c3.get(),
+      IRBuilder::add(c3.get(),
               IRBuilder::if_(IRExpr("BO->getOpcode() == BO_Sub"),
                              std::move(subBlk)));
     }
-    EmitExpr(c3.get(),
+    IRBuilder::addExpr(c3.get(),
              maxName + " = std::max({f.saved_max, " + maxName + "})");
-    EmitRaw(c3.get(), "ret = true; stack.pop_back(); break;");
+    IRBuilder::addRaw(c3.get(), "__cps_ret = true; __cps_stack.pop_back(); break;");
     IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
   }
-  AddStmt(w.get(), std::move(sw));
-  AddStmt(body.get(),
-          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
-  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  IRBuilder::add(w.get(), std::move(sw));
+  IRBuilder::add(body.get(),
+          IRBuilder::while_(IRExpr("!__cps_stack.empty()"), std::move(w)));
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("__cps_ret")));
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int ParseLinearTermsRule::cost() const {
-  return RuleCatalog::ParseLinearTerms.Cost;
-}
-
-const char *ParseLinearTermsRule::name() const {
-  return RuleCatalog::ParseLinearTerms.Name;
 }
 
 } // namespace cps

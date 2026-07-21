@@ -74,16 +74,13 @@ CpsResult BinaryStackRule::apply(const FunctionDecl *FD,
   const CallExpr *RightCall = nullptr;
   ExtractTwoRecursiveCalls(LHS, RHS, Ctx.FuncName, LeftCall, RightCall);
 
+  const BaseCaseRename curRename = MakeCurRename(Ctx, "__cps_cur");
   auto replaceCurCond = [&](const BaseCase &bc) -> std::string {
-    if (bc.CondExpr)
-      return ReplaceParamsWithCur(bc.CondExpr, Ctx);
-    return ReplaceParamsWithCurInString(bc.CondStr, Ctx.ParamNames);
+    return PrintBaseCaseCond(bc, Ctx.ASTCtx, curRename);
   };
 
   auto replaceCurValue = [&](const BaseCase &bc) -> std::string {
-    if (bc.ValueExpr)
-      return ReplaceParamsWithCur(bc.ValueExpr, Ctx);
-    return ReplaceParamsWithCurInString(bc.ValueStr, Ctx.ParamNames);
+    return PrintBaseCaseValue(bc, Ctx.ASTCtx, curRename);
   };
 
   std::string identity;
@@ -177,12 +174,6 @@ CpsResult BinaryStackRule::apply(const FunctionDecl *FD,
   b.function(sig, std::move(body));
 
   return PrintGeneratedUnit(b.unit);
-}
-
-int BinaryStackRule::cost() const { return RuleCatalog::BinaryStack.Cost; }
-
-const char *BinaryStackRule::name() const {
-  return RuleCatalog::BinaryStack.Name;
 }
 
 } // namespace cps

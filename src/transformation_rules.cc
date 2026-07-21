@@ -2,29 +2,39 @@
 
 namespace cps {
 
+namespace {
+
+template <typename R>
+std::unique_ptr<TransformationRule> MakeRule() {
+  return std::make_unique<R>();
+}
+
+} // anonymous namespace
+
 namespace RuleCatalog {
 
-const RuleInfo TailRecursion{"TailRecursionRule", 10};
-const RuleInfo Accumulator{"AccumulatorRule", 20};
-const RuleInfo Tupling{"TuplingRule", 30};
-const RuleInfo Memoization{"MemoizationRule", 40};
-const RuleInfo MultiDimMemo{"MultiDimMemoRule", 50};
-const RuleInfo Unfold{"UnfoldRule", 25};
-const RuleInfo BinaryStack{"BinaryStackRule", 100};
-const RuleInfo TreeFold{"TreeFoldRule", 120};
-const RuleInfo TreeTraversal{"TreeTraversalRule", 150};
-const RuleInfo IsInTailPosition{"IsInTailPositionRule", 160};
-const RuleInfo IsInTailPositionExpr{"IsInTailPositionExprRule", 160};
+const RuleInfo TailRecursion{"TailRecursionRule", 10, &MakeRule<TailRecursionRule>};
+const RuleInfo Accumulator{"AccumulatorRule", 20, &MakeRule<AccumulatorRule>};
+const RuleInfo Tupling{"TuplingRule", 30, &MakeRule<TuplingRule>};
+const RuleInfo Memoization{"MemoizationRule", 40, &MakeRule<MemoizationRule>};
+const RuleInfo MultiDimMemo{"MultiDimMemoRule", 50, &MakeRule<MultiDimMemoRule>};
+const RuleInfo Unfold{"UnfoldRule", 25, &MakeRule<UnfoldRule>};
+const RuleInfo BinaryStack{"BinaryStackRule", 100, &MakeRule<BinaryStackRule>};
+const RuleInfo TreeFold{"TreeFoldRule", 120, &MakeRule<TreeFoldRule>};
+const RuleInfo TreeTraversal{"TreeTraversalRule", 150, &MakeRule<TreeTraversalRule>};
+const RuleInfo IsInTailPosition{"IsInTailPositionRule", 160, &MakeRule<IsInTailPositionRule>};
+const RuleInfo IsInTailPositionExpr{"IsInTailPositionExprRule", 160, &MakeRule<IsInTailPositionExprRule>};
 const RuleInfo IsPureExprIgnoringRecursiveCalls{
-    "IsPureExprIgnoringRecursiveCallsRule", 160};
-const RuleInfo IsReturnOrIfReturnOrSwitch{"IsReturnOrIfReturnOrSwitchRule", 160};
-const RuleInfo UnwrapTrailingStmt{"UnwrapTrailingStmtRule", 160};
-const RuleInfo FlattenIfElse{"FlattenIfElseRule", 160};
-const RuleInfo EvalCondition{"EvalConditionRule", 160};
-const RuleInfo ParseLinearTerms{"ParseLinearTermsRule", 160};
-const RuleInfo StringStructuralRecursion{"StringStructuralRecursionRule", 150};
-const RuleInfo GenericStack{"GenericStackRule", 200};
-const RuleInfo Defunctionalized{"DefunctionalizedRule", 1000};
+    "IsPureExprIgnoringRecursiveCallsRule", 160,
+    &MakeRule<IsPureExprIgnoringRecursiveCallsRule>};
+const RuleInfo IsReturnOrIfReturnOrSwitch{"IsReturnOrIfReturnOrSwitchRule", 160, &MakeRule<IsReturnOrIfReturnOrSwitchRule>};
+const RuleInfo UnwrapTrailingStmt{"UnwrapTrailingStmtRule", 160, &MakeRule<UnwrapTrailingStmtRule>};
+const RuleInfo FlattenIfElse{"FlattenIfElseRule", 160, &MakeRule<FlattenIfElseRule>};
+const RuleInfo EvalCondition{"EvalConditionRule", 160, &MakeRule<EvalConditionRule>};
+const RuleInfo ParseLinearTerms{"ParseLinearTermsRule", 160, &MakeRule<ParseLinearTermsRule>};
+const RuleInfo StringStructuralRecursion{"StringStructuralRecursionRule", 150, &MakeRule<StringStructuralRecursionRule>};
+const RuleInfo GenericStack{"GenericStackRule", 200, &MakeRule<GenericStackRule>};
+const RuleInfo Defunctionalized{"DefunctionalizedRule", 1000, &MakeRule<DefunctionalizedRule>};
 
 const std::vector<const RuleInfo *> &All() {
   static std::vector<const RuleInfo *> kAll = {
@@ -54,50 +64,10 @@ const std::vector<const RuleInfo *> &All() {
 
 } // namespace RuleCatalog
 
-std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules() {
-  std::vector<std::unique_ptr<TransformationRule>> rules;
-  for (const auto *info : RuleCatalog::All()) {
-    if (info == &RuleCatalog::TailRecursion)
-      rules.emplace_back(std::make_unique<TailRecursionRule>());
-    else if (info == &RuleCatalog::Accumulator)
-      rules.emplace_back(std::make_unique<AccumulatorRule>());
-    else if (info == &RuleCatalog::Tupling)
-      rules.emplace_back(std::make_unique<TuplingRule>());
-    else if (info == &RuleCatalog::Memoization)
-      rules.emplace_back(std::make_unique<MemoizationRule>());
-    else if (info == &RuleCatalog::MultiDimMemo)
-      rules.emplace_back(std::make_unique<MultiDimMemoRule>());
-    else if (info == &RuleCatalog::Unfold)
-      rules.emplace_back(std::make_unique<UnfoldRule>());
-    else if (info == &RuleCatalog::BinaryStack)
-      rules.emplace_back(std::make_unique<BinaryStackRule>());
-    else if (info == &RuleCatalog::TreeFold)
-      rules.emplace_back(std::make_unique<TreeFoldRule>());
-    else if (info == &RuleCatalog::TreeTraversal)
-      rules.emplace_back(std::make_unique<TreeTraversalRule>());
-    else if (info == &RuleCatalog::IsInTailPosition)
-      rules.emplace_back(std::make_unique<IsInTailPositionRule>());
-    else if (info == &RuleCatalog::IsInTailPositionExpr)
-      rules.emplace_back(std::make_unique<IsInTailPositionExprRule>());
-    else if (info == &RuleCatalog::IsPureExprIgnoringRecursiveCalls)
-      rules.emplace_back(std::make_unique<IsPureExprIgnoringRecursiveCallsRule>());
-    else if (info == &RuleCatalog::IsReturnOrIfReturnOrSwitch)
-      rules.emplace_back(std::make_unique<IsReturnOrIfReturnOrSwitchRule>());
-    else if (info == &RuleCatalog::UnwrapTrailingStmt)
-      rules.emplace_back(std::make_unique<UnwrapTrailingStmtRule>());
-    else if (info == &RuleCatalog::FlattenIfElse)
-      rules.emplace_back(std::make_unique<FlattenIfElseRule>());
-    else if (info == &RuleCatalog::EvalCondition)
-      rules.emplace_back(std::make_unique<EvalConditionRule>());
-    else if (info == &RuleCatalog::ParseLinearTerms)
-      rules.emplace_back(std::make_unique<ParseLinearTermsRule>());
-    else if (info == &RuleCatalog::StringStructuralRecursion)
-      rules.emplace_back(std::make_unique<StringStructuralRecursionRule>());
-    else if (info == &RuleCatalog::GenericStack)
-      rules.emplace_back(std::make_unique<GenericStackRule>());
-    else if (info == &RuleCatalog::Defunctionalized)
-      rules.emplace_back(std::make_unique<DefunctionalizedRule>());
-  }
+std::vector<RuleEntry> CreateDefaultRules() {
+  std::vector<RuleEntry> rules;
+  for (const RuleInfo *info : RuleCatalog::All())
+    rules.push_back({info, info->Create()});
   return rules;
 }
 

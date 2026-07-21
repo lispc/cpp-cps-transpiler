@@ -13,8 +13,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class AccumulatorRule : public TransformationRule {
@@ -23,8 +21,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class TuplingRule : public TransformationRule {
@@ -33,8 +29,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class MemoizationRule : public TransformationRule {
@@ -43,8 +37,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // Multi-dimensional memoization: recurrences over two or more integer index
@@ -56,8 +48,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // Unfold (construction-side) recursion: the recursive call sits in a middle
@@ -71,8 +61,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class BinaryStackRule : public TransformationRule {
@@ -81,8 +69,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class GenericStackRule : public TransformationRule {
@@ -91,8 +77,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class DefunctionalizedRule : public TransformationRule {
@@ -101,8 +85,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // Tree-traversal recursion: functions that iterate over node children in a
@@ -114,8 +96,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // Tree fold (catamorphism/paramorphism): value-returning recursion over a
@@ -129,8 +109,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // Structural recursion: hand-crafted explicit-stack state machines for the
@@ -141,8 +119,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class IsInTailPositionExprRule : public TransformationRule {
@@ -151,8 +127,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class IsPureExprIgnoringRecursiveCallsRule : public TransformationRule {
@@ -161,8 +135,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class IsReturnOrIfReturnOrSwitchRule : public TransformationRule {
@@ -171,8 +143,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class UnwrapTrailingStmtRule : public TransformationRule {
@@ -181,8 +151,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class FlattenIfElseRule : public TransformationRule {
@@ -191,8 +159,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class EvalConditionRule : public TransformationRule {
@@ -201,8 +167,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 class ParseLinearTermsRule : public TransformationRule {
@@ -211,8 +175,6 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // String structural recursion: explicit-stack state machine for
@@ -224,17 +186,19 @@ public:
                const GenContext &Ctx) const override;
   CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                     GenContext &Ctx) const override;
-  int cost() const override;
-  const char *name() const override;
 };
 
 // ============================================================
-// Rule catalog: centralized names and costs
+// Rule catalog: centralized names, costs, and factories
 // ============================================================
 
 struct RuleInfo {
   const char *Name;
+  // Estimated runtime cost of the generated code; lower is better.  The
+  // engine picks the applicable rule with the smallest cost; ties are broken
+  // by the rule's position in RuleCatalog::All().
   int Cost;
+  std::unique_ptr<TransformationRule> (*Create)();
 };
 
 namespace RuleCatalog {
@@ -265,9 +229,15 @@ const std::vector<const RuleInfo *> &All();
 
 } // namespace RuleCatalog
 
+// A rule instance paired with its catalog metadata.
+struct RuleEntry {
+  const RuleInfo *Info;
+  std::unique_ptr<TransformationRule> Rule;
+};
+
 // Create the default ordered list of transformation rules.
-// Rules are tried in order; the first one that applies wins.
-std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules();
+// Applicable rules compete on RuleInfo::Cost; the lowest cost wins.
+std::vector<RuleEntry> CreateDefaultRules();
 
 } // namespace cps
 

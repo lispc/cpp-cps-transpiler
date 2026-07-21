@@ -210,15 +210,16 @@ CpsResult MultiDimMemoRule::apply(const FunctionDecl *FD,
       BA.RecExpr, holeRepls, declRepls, Ctx.ASTCtx));
 
   // Print a base-case condition/value with index params mapped to loop vars.
+  BaseCaseRename loopVarRename;
+  loopVarRename.DeclRepls = declRepls;
+  for (size_t d : indexDims)
+    loopVarRename.StringRepls.emplace_back(Ctx.ParamNames[d], loopVar[d]);
+  loopVarRename.StripParens = true;
+  loopVarRename.UseDeclPrinter = true;
+
   auto printWithLoopVars = [&](const BaseCase &bc, bool cond) -> std::string {
-    const Expr *E = cond ? bc.CondExpr : bc.ValueExpr;
-    if (E)
-      return StripOuterParens(
-          PrintExprWithDeclReplacements(E, declRepls, Ctx.ASTCtx));
-    std::string s = cond ? bc.CondStr : bc.ValueStr;
-    for (size_t d : indexDims)
-      s = ReplaceWholeWord(s, Ctx.ParamNames[d], loopVar[d]);
-    return s;
+    return cond ? PrintBaseCaseCond(bc, Ctx.ASTCtx, loopVarRename)
+                : PrintBaseCaseValue(bc, Ctx.ASTCtx, loopVarRename);
   };
 
   IRBuilder b;
@@ -294,12 +295,6 @@ CpsResult MultiDimMemoRule::apply(const FunctionDecl *FD,
 
   b.function(sig, std::move(body));
   return PrintGeneratedUnit(b.unit);
-}
-
-int MultiDimMemoRule::cost() const { return RuleCatalog::MultiDimMemo.Cost; }
-
-const char *MultiDimMemoRule::name() const {
-  return RuleCatalog::MultiDimMemo.Name;
 }
 
 } // namespace cps

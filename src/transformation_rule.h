@@ -69,14 +69,13 @@ struct GenContext {
   std::string RetType;
 
   // Primary parameter identity.  Rules should prefer Params/ParamDeclSet over
-  // ParamNames/ParamNameSet to avoid name-shadowing and overload issues.
+  // ParamNames to avoid name-shadowing and overload issues.
   std::vector<const clang::ParmVarDecl *> Params;
   std::unordered_set<const clang::ValueDecl *> ParamDeclSet;
 
   // Convenience strings derived from Params; kept for frame-field naming and
   // diagnostics.
   std::vector<std::string> ParamNames;
-  std::unordered_set<std::string> ParamNameSet;
   const clang::ASTContext *ASTCtx;
 
   // Optional user overrides.
@@ -226,12 +225,6 @@ public:
   virtual CpsResult apply(const clang::FunctionDecl *FD,
                           const BodyAnalysis &BA,
                           GenContext &Ctx) const = 0;
-
-  // Estimated runtime cost of the generated code. Lower is better.
-  // Used by the rule engine to pick the best applicable rule.
-  virtual int cost() const = 0;
-
-  virtual const char *name() const = 0;
 };
 
 } // namespace cps

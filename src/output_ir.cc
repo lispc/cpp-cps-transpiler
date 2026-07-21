@@ -407,6 +407,19 @@ IRBlock &IRBuilder::add(IRBlock *blk, std::unique_ptr<IRStmt> s) {
   return *blk;
 }
 
+IRBlock &IRBuilder::addExpr(IRBlock *blk, const std::string &e) {
+  return add(blk, expr(IRExpr(e)));
+}
+
+IRBlock &IRBuilder::addRaw(IRBlock *blk, const std::string &text) {
+  return add(blk, rawStmt(text));
+}
+
+IRBlock &IRBuilder::addVar(IRBlock *blk, const std::string &type,
+                           const std::string &name, const std::string &init) {
+  return add(blk, var(type, name, IRExpr(init)));
+}
+
 std::unique_ptr<IRIf>
 IRBuilder::if_(IRExpr cond, std::unique_ptr<IRStmt> thenBranch,
                std::unique_ptr<IRStmt> elseBranch) {
