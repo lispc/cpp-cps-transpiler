@@ -1,6 +1,6 @@
 #include "transformation_rules.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/OperationKinds.h"
@@ -26,6 +26,39 @@ bool CommonStructuralApplies(const FunctionDecl *FD, const GenContext &Ctx) {
   if (HasForbiddenLoop(FD->getBody(), Ctx.FuncName, Ctx.ASTCtx))
     return false;
   return true;
+}
+
+// Small local conveniences over IRBuilder for the leaf statements these
+// rules emit.
+
+void AddStmt(IRBlock *blk, std::unique_ptr<IRStmt> s) {
+  IRBuilder::add(blk, std::move(s));
+}
+
+// Add an expression statement (the IR printer appends the semicolon).
+void EmitExpr(IRBlock *blk, const std::string &e) {
+  AddStmt(blk, IRBuilder::expr(IRExpr(e)));
+}
+
+// Add a raw statement line; the text must carry its own semicolons.
+void EmitRaw(IRBlock *blk, const std::string &text) {
+  AddStmt(blk, IRBuilder::rawStmt(text));
+}
+
+// Add a `type name = init;` variable declaration.
+void EmitVar(IRBlock *blk, const std::string &type, const std::string &name,
+             const std::string &init) {
+  AddStmt(blk, IRBuilder::var(type, name, IRExpr(init)));
+}
+
+// Build a local `struct Frame { ... };` definition from (type, name) fields.
+std::unique_ptr<IRLocalStruct>
+FrameStruct(std::vector<std::pair<std::string, std::string>> fields) {
+  IRStructData data;
+  data.name = "Frame";
+  for (auto &f : fields)
+    data.fields.emplace_back(std::move(f.first), std::move(f.second));
+  return IRBuilder::localStruct(std::move(data));
 }
 
 } // anonymous namespace
@@ -60,102 +93,147 @@ CpsResult IsInTailPositionRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string sName = FD->getParamDecl(0)->getNameAsString();
   std::string targetName = FD->getParamDecl(1)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Stmt *S; int state; bool saved; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + sName + ", 0, false});");
-    b.line(Ctx.RetType + " ret = false;");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Stmt *" + sName + " = f.S;");
-        sw.line("if (!" + sName + ") { ret = false; stack.pop_back(); break; }");
-        sw.line("if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(" + sName +
-                ")) {");
-        sw.inc();
-        sw.line("const Expr *E = RS->getRetValue();");
-        sw.line("if (const CallExpr *CE = dyn_cast<CallExpr>(E)) {");
-        sw.inc();
-        sw.line("if (const FunctionDecl *Callee = CE->getDirectCallee()) {");
-        sw.inc();
-        sw.line("ret = Callee->getNameAsString() == " + targetName +
-                "->getNameAsString();");
-        sw.line("stack.pop_back();");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("ret = false; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const IfStmt *IS = dyn_cast<IfStmt>(" + sName + ")) {");
-        sw.inc();
-        sw.line("if (const Expr *Cond = IS->getCond()) {");
-        sw.inc();
-        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(Cond)) {");
-        sw.inc();
-        sw.line("if (BO->getOpcode() == BO_LAnd || BO->getOpcode() == BO_LOr) {");
-        sw.inc();
-        sw.line("f.state = 1; stack.push_back({IS->getThen(), 0, false}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("f.state = 2; stack.push_back({IS->getThen(), 0, false}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(" + sName +
-                ")) {");
-        sw.inc();
-        sw.line("if (CS->body_empty()) { ret = false; stack.pop_back(); break; }");
-        sw.line("f.state = 5; stack.push_back({CS->body_back(), 0, false}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("ret = false; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"},
+                                   {"int", "state"},
+                                   {"bool", "saved"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(), "stack.push_back({" + sName + ", 0, false})");
+  EmitVar(body.get(), Ctx.RetType, "ret", "false");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("const IfStmt *IS = dyn_cast<IfStmt>(f.S);");
-        sw.line("if (ret) { f.state = 4; stack.push_back({IS->getElse(), 0, false}); }");
-        sw.line("else { ret = false; stack.pop_back(); }");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: {");
-        sw.inc();
-        sw.line("const IfStmt *IS = dyn_cast<IfStmt>(f.S);");
-        sw.line("if (!ret) { stack.pop_back(); break; }");
-        sw.line("f.saved = ret; f.state = 3; stack.push_back({IS->getElse(), 0, false}); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 3: { ret = f.saved && ret; stack.pop_back(); break; }");
-        sw.line("case 4: { stack.pop_back(); break; }");
-        sw.line("case 5: { stack.pop_back(); break; }");
-      });
-    });
-    b.line("return ret;");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Stmt *", sName, "f.S");
+    EmitRaw(c0.get(),
+            "if (!" + sName + ") { ret = false; stack.pop_back(); break; }");
+    {
+      auto rsBlk = IRBuilder::block();
+      EmitVar(rsBlk.get(), "const Expr *", "E", "RS->getRetValue()");
+      {
+        auto ceBlk = IRBuilder::block();
+        {
+          auto calleeBlk = IRBuilder::block();
+          EmitExpr(calleeBlk.get(), "ret = Callee->getNameAsString() == " +
+                                        targetName + "->getNameAsString()");
+          EmitExpr(calleeBlk.get(), "stack.pop_back()");
+          AddStmt(calleeBlk.get(), IRBuilder::break_());
+          AddStmt(ceBlk.get(),
+                  IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
+                                        "CE->getDirectCallee()"),
+                                 std::move(calleeBlk)));
+        }
+        AddStmt(rsBlk.get(),
+                IRBuilder::if_(
+                    IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(E)"),
+                    std::move(ceBlk)));
+      }
+      EmitRaw(rsBlk.get(), "ret = false; stack.pop_back(); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
+                                    "dyn_cast<ReturnStmt>(" +
+                                    sName + ")"),
+                             std::move(rsBlk)));
+    }
+    {
+      auto isBlk = IRBuilder::block();
+      {
+        auto condBlk = IRBuilder::block();
+        {
+          auto boBlk = IRBuilder::block();
+          {
+            auto opBlk = IRBuilder::block();
+            EmitRaw(opBlk.get(), "f.state = 1; stack.push_back({IS->getThen(), "
+                                 "0, false}); break;");
+            AddStmt(boBlk.get(),
+                    IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LAnd || "
+                                          "BO->getOpcode() == BO_LOr"),
+                                   std::move(opBlk)));
+          }
+          AddStmt(condBlk.get(),
+                  IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
+                                        "dyn_cast<BinaryOperator>(Cond)"),
+                                 std::move(boBlk)));
+        }
+        AddStmt(isBlk.get(),
+                IRBuilder::if_(IRExpr("const Expr *Cond = IS->getCond()"),
+                               std::move(condBlk)));
+      }
+      EmitRaw(isBlk.get(), "f.state = 2; stack.push_back({IS->getThen(), 0, "
+                           "false}); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(
+                  IRExpr("const IfStmt *IS = dyn_cast<IfStmt>(" + sName + ")"),
+                  std::move(isBlk)));
+    }
+    {
+      auto csBlk = IRBuilder::block();
+      EmitRaw(csBlk.get(), "if (CS->body_empty()) { ret = false; "
+                           "stack.pop_back(); break; }");
+      EmitRaw(csBlk.get(), "f.state = 5; stack.push_back({CS->body_back(), 0, "
+                           "false}); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
+                                    "dyn_cast<CompoundStmt>(" +
+                                    sName + ")"),
+                             std::move(csBlk)));
+    }
+    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  {
+    auto c1 = IRBuilder::block();
+    EmitVar(c1.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
+    auto thenBlk = IRBuilder::block();
+    EmitRaw(thenBlk.get(),
+            "f.state = 4; stack.push_back({IS->getElse(), 0, false});");
+    auto elseBlk = IRBuilder::block();
+    EmitRaw(elseBlk.get(), "ret = false; stack.pop_back();");
+    AddStmt(c1.get(), IRBuilder::if_(IRExpr("ret"), std::move(thenBlk),
+                                     std::move(elseBlk)));
+    AddStmt(c1.get(), IRBuilder::break_());
+    IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitVar(c2.get(), "const IfStmt *", "IS", "dyn_cast<IfStmt>(f.S)");
+    EmitRaw(c2.get(), "if (!ret) { stack.pop_back(); break; }");
+    EmitRaw(c2.get(), "f.saved = ret; f.state = 3; "
+                      "stack.push_back({IS->getElse(), 0, false}); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  {
+    auto c3 = IRBuilder::block();
+    EmitRaw(c3.get(), "ret = f.saved && ret; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
+  }
+  {
+    auto c4 = IRBuilder::block();
+    EmitRaw(c4.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"4"}, std::move(c4));
+  }
+  {
+    auto c5 = IRBuilder::block();
+    EmitRaw(c5.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"5"}, std::move(c5));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int IsInTailPositionRule::cost() const {
@@ -201,80 +279,98 @@ CpsResult IsInTailPositionExprRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string eName = FD->getParamDecl(0)->getNameAsString();
   std::string sName = FD->getParamDecl(1)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Expr *E; const Stmt *S; int state; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + eName + ", " + sName + ", 0});");
-    b.line(Ctx.RetType + " ret = false;");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Expr *" + eName + " = f.E;");
-        sw.line("const Stmt *" + sName + " = f.S;");
-        sw.line("if (!" + eName + " || !" + sName +
-                ") { ret = false; stack.pop_back(); break; }");
-        sw.line("if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(" + sName +
-                ")) {");
-        sw.inc();
-        sw.line("ret = RS->getRetValue() == " + eName + ";");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const Expr *ExprS = dyn_cast<Expr>(" + sName + ")) {");
-        sw.inc();
-        sw.line("ret = ExprS == " + eName + ";");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")) {");
-        sw.inc();
-        sw.line("f.state = 1; stack.push_back({" + eName +
-                ", IfS->getThen(), 0}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(" + sName +
-                ")) {");
-        sw.inc();
-        sw.line("if (CS->body_empty()) { ret = false; stack.pop_back(); break; }");
-        sw.line("const Stmt *Last = nullptr;");
-        sw.line("for (const Stmt *Child : CS->body())");
-        sw.inc();
-        sw.line("Last = Child;");
-        sw.dec();
-        sw.line("f.state = 2; stack.push_back({" + eName + ", Last, 0}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("ret = false; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+                                   {"const Stmt *", "S"},
+                                   {"int", "state"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(), "stack.push_back({" + eName + ", " + sName + ", 0})");
+  EmitVar(body.get(), Ctx.RetType, "ret", "false");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("if (ret) { stack.pop_back(); break; }");
-        sw.line("const IfStmt *IfS = dyn_cast<IfStmt>(f.S);");
-        sw.line("f.state = 2; stack.push_back({f.E, IfS->getElse(), 0}); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: { stack.pop_back(); break; }");
-      });
-    });
-    b.line("return ret;");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Expr *", eName, "f.E");
+    EmitVar(c0.get(), "const Stmt *", sName, "f.S");
+    EmitRaw(c0.get(), "if (!" + eName + " || !" + sName +
+                          ") { ret = false; stack.pop_back(); break; }");
+    {
+      auto rsBlk = IRBuilder::block();
+      EmitExpr(rsBlk.get(), "ret = RS->getRetValue() == " + eName);
+      EmitRaw(rsBlk.get(), "stack.pop_back(); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
+                                    "dyn_cast<ReturnStmt>(" +
+                                    sName + ")"),
+                             std::move(rsBlk)));
+    }
+    {
+      auto esBlk = IRBuilder::block();
+      EmitExpr(esBlk.get(), "ret = ExprS == " + eName);
+      EmitRaw(esBlk.get(), "stack.pop_back(); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(
+                  IRExpr("const Expr *ExprS = dyn_cast<Expr>(" + sName + ")"),
+                  std::move(esBlk)));
+    }
+    {
+      auto ifBlk = IRBuilder::block();
+      EmitRaw(ifBlk.get(), "f.state = 1; stack.push_back({" + eName +
+                               ", IfS->getThen(), 0}); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(
+                  IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")"),
+                  std::move(ifBlk)));
+    }
+    {
+      auto csBlk = IRBuilder::block();
+      EmitRaw(csBlk.get(), "if (CS->body_empty()) { ret = false; "
+                           "stack.pop_back(); break; }");
+      EmitVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
+      AddStmt(csBlk.get(),
+              IRBuilder::for_("const Stmt *Child : CS->body()", IRExpr(""), "",
+                              IRBuilder::expr(IRExpr("Last = Child"))));
+      EmitRaw(csBlk.get(), "f.state = 2; stack.push_back({" + eName +
+                               ", Last, 0}); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
+                                    "dyn_cast<CompoundStmt>(" +
+                                    sName + ")"),
+                             std::move(csBlk)));
+    }
+    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  {
+    auto c1 = IRBuilder::block();
+    EmitRaw(c1.get(), "if (ret) { stack.pop_back(); break; }");
+    EmitVar(c1.get(), "const IfStmt *", "IfS", "dyn_cast<IfStmt>(f.S)");
+    EmitRaw(c1.get(),
+            "f.state = 2; stack.push_back({f.E, IfS->getElse(), 0}); break;");
+    IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitRaw(c2.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int IsInTailPositionExprRule::cost() const {
@@ -323,153 +419,176 @@ CpsResult IsPureExprIgnoringRecursiveCallsRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string eName = FD->getParamDecl(0)->getNameAsString();
   std::string funcName = FD->getParamDecl(1)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Expr *E; int state; unsigned count; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("std::vector<bool> values;");
-    b.line("stack.push_back({" + eName + ", 0, 0});");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Expr *" + eName + " = f.E;");
-        sw.line("if (!" + eName + ") { values.push_back(true); stack.pop_back(); break; }");
-        sw.line(eName + " = " + eName + "->IgnoreParenImpCasts();");
-        sw.line("if (const CallExpr *CE = dyn_cast<CallExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("if (const FunctionDecl *Callee = CE->getDirectCallee()) {");
-        sw.inc();
-        sw.line("if (Callee->getNameAsString() == " + funcName + ") {");
-        sw.inc();
-        sw.line("values.push_back(true); stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (IsKnownPureFunction(Callee->getNameAsString())) {");
-        sw.inc();
-        sw.line("unsigned n = CE->getNumArgs();");
-        sw.line("f.count = n;");
-        sw.line("if (n == 0) { values.push_back(true); stack.pop_back(); break; }");
-        sw.line("f.state = 1;");
-        sw.line("for (int i = static_cast<int>(n) - 1; i >= 0; --i)");
-        sw.inc();
-        sw.line("stack.push_back({CE->getArg(i), 0, 0});");
-        sw.dec();
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("values.push_back(false); stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(" +
-                eName + ")) {");
-        sw.inc();
-        sw.line("if (BO->isAssignmentOp() || BO->getOpcode() == BO_Comma) {");
-        sw.inc();
-        sw.line("values.push_back(false); stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("f.state = 2;");
-        sw.line("stack.push_back({BO->getRHS(), 0, 0});");
-        sw.line("stack.push_back({BO->getLHS(), 0, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(" + eName +
-                ")) {");
-        sw.inc();
-        sw.line("if (UO->isIncrementDecrementOp()) {");
-        sw.inc();
-        sw.line("values.push_back(false); stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("f.state = 3;");
-        sw.line("stack.push_back({UO->getSubExpr(), 0, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("std::vector<const Expr *> __cps_children;");
-        sw.line("for (const Stmt *Child : " + eName + "->children()) {");
-        sw.inc();
-        sw.line("if (const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child))");
-        sw.inc();
-        sw.line("__cps_children.push_back(ChildExpr);");
-        sw.dec();
-        sw.dec();
-        sw.line("}");
-        sw.line("f.count = static_cast<unsigned>(__cps_children.size());");
-        sw.line("if (f.count == 0) { values.push_back(true); stack.pop_back(); break; }");
-        sw.line("f.state = 4;");
-        sw.line("for (auto it = __cps_children.rbegin(); it != __cps_children.rend(); ++it)");
-        sw.inc();
-        sw.line("stack.push_back({*it, 0, 0});");
-        sw.dec();
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+                                   {"int", "state"},
+                                   {"unsigned", "count"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  AddStmt(body.get(), IRBuilder::var("std::vector<bool>", "values"));
+  EmitExpr(body.get(), "stack.push_back({" + eName + ", 0, 0})");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("bool res = true;");
-        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
-        sw.inc();
-        sw.line("bool v = values.back(); values.pop_back();");
-        sw.line("res = res && v;");
-        sw.dec();
-        sw.line("}");
-        sw.line("values.push_back(res);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: {");
-        sw.inc();
-        sw.line("bool rhs = values.back(); values.pop_back();");
-        sw.line("bool lhs = values.back(); values.pop_back();");
-        sw.line("values.push_back(lhs && rhs);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 3: {");
-        sw.inc();
-        sw.line("bool v = values.back(); values.pop_back();");
-        sw.line("values.push_back(v);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 4: {");
-        sw.inc();
-        sw.line("bool res = true;");
-        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
-        sw.inc();
-        sw.line("bool v = values.back(); values.pop_back();");
-        sw.line("res = res && v;");
-        sw.dec();
-        sw.line("}");
-        sw.line("values.push_back(res);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-      });
-    });
-    b.line("return values.empty() ? true : values.back();");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Expr *", eName, "f.E");
+    EmitRaw(c0.get(), "if (!" + eName +
+                          ") { values.push_back(true); stack.pop_back(); "
+                          "break; }");
+    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    {
+      auto ceBlk = IRBuilder::block();
+      {
+        auto calleeBlk = IRBuilder::block();
+        {
+          auto matchBlk = IRBuilder::block();
+          EmitRaw(matchBlk.get(),
+                  "values.push_back(true); stack.pop_back(); break;");
+          AddStmt(calleeBlk.get(),
+                  IRBuilder::if_(
+                      IRExpr("Callee->getNameAsString() == " + funcName),
+                      std::move(matchBlk)));
+        }
+        {
+          auto pureBlk = IRBuilder::block();
+          EmitVar(pureBlk.get(), "unsigned", "n", "CE->getNumArgs()");
+          EmitExpr(pureBlk.get(), "f.count = n");
+          EmitRaw(pureBlk.get(), "if (n == 0) { values.push_back(true); "
+                                 "stack.pop_back(); break; }");
+          EmitExpr(pureBlk.get(), "f.state = 1");
+          AddStmt(pureBlk.get(),
+                  IRBuilder::for_("int i = static_cast<int>(n) - 1",
+                                  IRExpr("i >= 0"), "--i",
+                                  IRBuilder::expr(IRExpr(
+                                      "stack.push_back({CE->getArg(i), 0, 0})"))));
+          AddStmt(pureBlk.get(), IRBuilder::break_());
+          AddStmt(calleeBlk.get(),
+                  IRBuilder::if_(IRExpr("IsKnownPureFunction("
+                                        "Callee->getNameAsString())"),
+                                 std::move(pureBlk)));
+        }
+        AddStmt(ceBlk.get(),
+                IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
+                                      "CE->getDirectCallee()"),
+                               std::move(calleeBlk)));
+      }
+      EmitRaw(ceBlk.get(), "values.push_back(false); stack.pop_back(); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(" +
+                                    eName + ")"),
+                             std::move(ceBlk)));
+    }
+    {
+      auto boBlk = IRBuilder::block();
+      {
+        auto assignBlk = IRBuilder::block();
+        EmitRaw(assignBlk.get(),
+                "values.push_back(false); stack.pop_back(); break;");
+        AddStmt(boBlk.get(),
+                IRBuilder::if_(IRExpr("BO->isAssignmentOp() || "
+                                      "BO->getOpcode() == BO_Comma"),
+                               std::move(assignBlk)));
+      }
+      EmitExpr(boBlk.get(), "f.state = 2");
+      EmitExpr(boBlk.get(), "stack.push_back({BO->getRHS(), 0, 0})");
+      EmitExpr(boBlk.get(), "stack.push_back({BO->getLHS(), 0, 0})");
+      AddStmt(boBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
+                                    "dyn_cast<BinaryOperator>(" +
+                                    eName + ")"),
+                             std::move(boBlk)));
+    }
+    {
+      auto uoBlk = IRBuilder::block();
+      {
+        auto incBlk = IRBuilder::block();
+        EmitRaw(incBlk.get(),
+                "values.push_back(false); stack.pop_back(); break;");
+        AddStmt(uoBlk.get(),
+                IRBuilder::if_(IRExpr("UO->isIncrementDecrementOp()"),
+                               std::move(incBlk)));
+      }
+      EmitExpr(uoBlk.get(), "f.state = 3");
+      EmitExpr(uoBlk.get(), "stack.push_back({UO->getSubExpr(), 0, 0})");
+      AddStmt(uoBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
+                                    "dyn_cast<UnaryOperator>(" +
+                                    eName + ")"),
+                             std::move(uoBlk)));
+    }
+    AddStmt(c0.get(),
+            IRBuilder::var("std::vector<const Expr *>", "__cps_children"));
+    {
+      auto childLoopBlk = IRBuilder::block();
+      AddStmt(childLoopBlk.get(),
+              IRBuilder::if_(
+                  IRExpr("const Expr *ChildExpr = dyn_cast_or_null<Expr>(Child)"),
+                  IRBuilder::expr(IRExpr("__cps_children.push_back(ChildExpr)"))));
+      AddStmt(c0.get(),
+              IRBuilder::for_("const Stmt *Child : " + eName + "->children()",
+                              IRExpr(""), "", std::move(childLoopBlk)));
+    }
+    EmitExpr(c0.get(),
+             "f.count = static_cast<unsigned>(__cps_children.size())");
+    EmitRaw(c0.get(), "if (f.count == 0) { values.push_back(true); "
+                      "stack.pop_back(); break; }");
+    EmitExpr(c0.get(), "f.state = 4");
+    AddStmt(c0.get(),
+            IRBuilder::for_("auto it = __cps_children.rbegin()",
+                            IRExpr("it != __cps_children.rend()"), "++it",
+                            IRBuilder::expr(IRExpr("stack.push_back({*it, 0, 0})"))));
+    AddStmt(c0.get(), IRBuilder::break_());
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  for (const char *lbl : {"1", "4"}) {
+    auto agg = IRBuilder::block();
+    EmitVar(agg.get(), "bool", "res", "true");
+    {
+      auto loopBlk = IRBuilder::block();
+      EmitRaw(loopBlk.get(), "bool v = values.back(); values.pop_back();");
+      EmitExpr(loopBlk.get(), "res = res && v");
+      AddStmt(agg.get(),
+              IRBuilder::for_("unsigned i = 0", IRExpr("i < f.count"), "++i",
+                              std::move(loopBlk)));
+    }
+    EmitExpr(agg.get(), "values.push_back(res)");
+    EmitRaw(agg.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {lbl}, std::move(agg));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitRaw(c2.get(), "bool rhs = values.back(); values.pop_back();");
+    EmitRaw(c2.get(), "bool lhs = values.back(); values.pop_back();");
+    EmitExpr(c2.get(), "values.push_back(lhs && rhs)");
+    EmitRaw(c2.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  {
+    auto c3 = IRBuilder::block();
+    EmitRaw(c3.get(), "bool v = values.back(); values.pop_back();");
+    EmitExpr(c3.get(), "values.push_back(v)");
+    EmitRaw(c3.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(),
+          IRBuilder::ret(IRExpr("values.empty() ? true : values.back()")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int IsPureExprIgnoringRecursiveCallsRule::cost() const {
@@ -510,39 +629,47 @@ CpsResult IsReturnOrIfReturnOrSwitchRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string sName = FD->getParamDecl(0)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Stmt *S; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + sName + "});");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame f = stack.back(); stack.pop_back();");
-      w.line("if (isa<ReturnStmt>(f.S)) return true;");
-      w.line("if (isa<IfStmt>(f.S)) return true;");
-      w.line("if (isa<SwitchStmt>(f.S)) return true;");
-      w.line("if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(f.S)) {");
-      w.inc();
-      w.line("if (CS->size() == 1) stack.push_back({CS->body_begin()[0]});");
-      w.line("else return false;");
-      w.dec();
-      w.line("} else {");
-      w.inc();
-      w.line("return false;");
-      w.dec();
-      w.line("}");
-    });
-    b.line("return false;");
-  });
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(), "stack.push_back({" + sName + "})");
 
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitRaw(w.get(), "Frame f = stack.back(); stack.pop_back();");
+  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<ReturnStmt>(f.S)"),
+                                  IRBuilder::ret(IRExpr("true"))));
+  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<IfStmt>(f.S)"),
+                                  IRBuilder::ret(IRExpr("true"))));
+  AddStmt(w.get(), IRBuilder::if_(IRExpr("isa<SwitchStmt>(f.S)"),
+                                  IRBuilder::ret(IRExpr("true"))));
+  {
+    auto csBlk = IRBuilder::block();
+    AddStmt(csBlk.get(),
+            IRBuilder::if_(
+                IRExpr("CS->size() == 1"),
+                IRBuilder::expr(
+                    IRExpr("stack.push_back({CS->body_begin()[0]})")),
+                IRBuilder::ret(IRExpr("false"))));
+    auto elseBlk = IRBuilder::block();
+    AddStmt(elseBlk.get(), IRBuilder::ret(IRExpr("false")));
+    AddStmt(w.get(),
+            IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
+                                  "dyn_cast<CompoundStmt>(f.S)"),
+                           std::move(csBlk), std::move(elseBlk)));
+  }
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(), IRBuilder::ret(IRExpr("false")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int IsReturnOrIfReturnOrSwitchRule::cost() const {
@@ -591,39 +718,47 @@ CpsResult UnwrapTrailingStmtRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string sName = FD->getParamDecl(0)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.block("while (true)", [&](CodeEmitter &w) {
-      w.line("if (const CompoundStmt *CS = dyn_cast<CompoundStmt>(" + sName +
-              ")) {");
-      w.inc();
-      w.line("if (CS->body_empty()) return nullptr;");
-      w.line("const Stmt *Last = nullptr;");
-      w.line("for (const Stmt *B : CS->body()) Last = B;");
-      w.line(sName + " = Last;");
-      w.line("continue;");
-      w.dec();
-      w.line("}");
-      w.line("if (const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")) {");
-      w.inc();
-      w.line("if (IfS->getElse()) return " + sName + ";");
-      w.line(sName + " = IfS->getThen();");
-      w.line("continue;");
-      w.dec();
-      w.line("}");
-      w.line("return " + sName + ";");
-    });
-  });
-
-  return e.str();
+  auto body = IRBuilder::block();
+  auto w = IRBuilder::block();
+  {
+    auto csBlk = IRBuilder::block();
+    AddStmt(csBlk.get(), IRBuilder::if_(IRExpr("CS->body_empty()"),
+                                        IRBuilder::ret(IRExpr("nullptr"))));
+    EmitVar(csBlk.get(), "const Stmt *", "Last", "nullptr");
+    AddStmt(csBlk.get(),
+            IRBuilder::for_("const Stmt *B : CS->body()", IRExpr(""), "",
+                            IRBuilder::expr(IRExpr("Last = B"))));
+    EmitExpr(csBlk.get(), sName + " = Last");
+    AddStmt(csBlk.get(), IRBuilder::continue_());
+    AddStmt(w.get(),
+            IRBuilder::if_(IRExpr("const CompoundStmt *CS = "
+                                  "dyn_cast<CompoundStmt>(" +
+                                  sName + ")"),
+                           std::move(csBlk)));
+  }
+  {
+    auto ifBlk = IRBuilder::block();
+    AddStmt(ifBlk.get(), IRBuilder::if_(IRExpr("IfS->getElse()"),
+                                        IRBuilder::ret(IRExpr(sName))));
+    EmitExpr(ifBlk.get(), sName + " = IfS->getThen()");
+    AddStmt(ifBlk.get(), IRBuilder::continue_());
+    AddStmt(w.get(),
+            IRBuilder::if_(
+                IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(" + sName + ")"),
+                std::move(ifBlk)));
+  }
+  AddStmt(w.get(), IRBuilder::ret(IRExpr(sName)));
+  AddStmt(body.get(), IRBuilder::while_(IRExpr("true"), std::move(w)));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int UnwrapTrailingStmtRule::cost() const {
@@ -680,44 +815,59 @@ CpsResult FlattenIfElseRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string sName = FD->getParamDecl(0)->getNameAsString();
   std::string baName = FD->getParamDecl(1)->getNameAsString();
   std::string ctxName = FD->getParamDecl(2)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Stmt *S; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + sName + "});");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame f = stack.back(); stack.pop_back();");
-      w.line("if (!f.S) continue;");
-      w.line("if (const IfStmt *IfS = dyn_cast<IfStmt>(f.S)) {");
-      w.inc();
-      w.line("const Expr *BaseExpr = ExtractReturnExpr(IfS->getThen());");
-      w.line("if (BaseExpr) " + baName +
-             ".BaseCases.push_back(MakeBaseCase(IfS->getCond(), BaseExpr, " +
-             ctxName + "));");
-      w.line("if (const Stmt *Else = IfS->getElse()) stack.push_back({Else});");
-      w.line("continue;");
-      w.dec();
-      w.line("}");
-      w.line("if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(f.S)) {");
-      w.inc();
-      w.line(baName + ".RecExpr = RS->getRetValue();");
-      w.line(baName + ".IsRecursive = true;");
-      w.dec();
-      w.line("}");
-    });
-  });
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Stmt *", "S"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(), "stack.push_back({" + sName + "})");
 
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitRaw(w.get(), "Frame f = stack.back(); stack.pop_back();");
+  AddStmt(w.get(),
+          IRBuilder::if_(IRExpr("!f.S"), IRBuilder::continue_()));
+  {
+    auto ifBlk = IRBuilder::block();
+    EmitVar(ifBlk.get(), "const Expr *", "BaseExpr",
+            "ExtractReturnExpr(IfS->getThen())");
+    AddStmt(ifBlk.get(),
+            IRBuilder::if_(
+                IRExpr("BaseExpr"),
+                IRBuilder::expr(IRExpr(
+                    baName +
+                    ".BaseCases.push_back(MakeBaseCase(IfS->getCond(), "
+                    "BaseExpr, " +
+                    ctxName + "))"))));
+    AddStmt(ifBlk.get(),
+            IRBuilder::if_(IRExpr("const Stmt *Else = IfS->getElse()"),
+                           IRBuilder::expr(IRExpr("stack.push_back({Else})"))));
+    AddStmt(ifBlk.get(), IRBuilder::continue_());
+    AddStmt(w.get(),
+            IRBuilder::if_(
+                IRExpr("const IfStmt *IfS = dyn_cast<IfStmt>(f.S)"),
+                std::move(ifBlk)));
+  }
+  {
+    auto rsBlk = IRBuilder::block();
+    EmitExpr(rsBlk.get(), baName + ".RecExpr = RS->getRetValue()");
+    EmitExpr(rsBlk.get(), baName + ".IsRecursive = true");
+    AddStmt(w.get(),
+            IRBuilder::if_(IRExpr("const ReturnStmt *RS = "
+                                  "dyn_cast<ReturnStmt>(f.S)"),
+                           std::move(rsBlk)));
+  }
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int FlattenIfElseRule::cost() const {
@@ -760,143 +910,180 @@ CpsResult EvalConditionRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string eName = FD->getParamDecl(0)->getNameAsString();
   std::string pName = FD->getParamDecl(1)->getNameAsString();
   std::string vName = FD->getParamDecl(2)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame { const Expr *E; int state; EvalResult saved; };");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + eName + ", 0, EvalResult::Unknown});");
-    b.line(Ctx.RetType + " ret = EvalResult::Unknown;");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Expr *" + eName + " = f.E;");
-        sw.line(eName + " = " + eName + "->IgnoreParenImpCasts();");
-        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(" +
-                eName + ")) {");
-        sw.inc();
-        sw.line("if (BO->getOpcode() == BO_LAnd) {");
-        sw.inc();
-        sw.line("f.state = 1; stack.push_back({BO->getLHS(), 0, EvalResult::Unknown}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (BO->getOpcode() == BO_LOr) {");
-        sw.inc();
-        sw.line("f.state = 2; stack.push_back({BO->getLHS(), 0, EvalResult::Unknown}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("int lhsVal = 0, rhsVal = 0;");
-        sw.line("bool lhsKnown = ExtractParamOrLiteral(BO->getLHS(), " + pName +
-                ", " + vName + ", lhsVal);");
-        sw.line("bool rhsKnown = ExtractParamOrLiteral(BO->getRHS(), " + pName +
-                ", " + vName + ", rhsVal);");
-        sw.line("if (!lhsKnown || !rhsKnown) { ret = EvalResult::Unknown; stack.pop_back(); break; }");
-        sw.line("switch (BO->getOpcode()) {");
-        sw.inc();
-        sw.line("case BO_EQ: ret = (lhsVal == rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("case BO_NE: ret = (lhsVal != rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("case BO_LT: ret = (lhsVal <  rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("case BO_GT: ret = (lhsVal >  rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("case BO_LE: ret = (lhsVal <= rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("case BO_GE: ret = (lhsVal >= rhsVal) ? EvalResult::True : EvalResult::False; break;");
-        sw.line("default: ret = EvalResult::Unknown; break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("if (UO->getOpcode() == UO_LNot) {");
-        sw.inc();
-        sw.line("f.state = 3; stack.push_back({UO->getSubExpr(), 0, EvalResult::Unknown}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("ret = EvalResult::Unknown; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+                                   {"int", "state"},
+                                   {"EvalResult", "saved"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(),
+           "stack.push_back({" + eName + ", 0, EvalResult::Unknown})");
+  EmitVar(body.get(), Ctx.RetType, "ret", "EvalResult::Unknown");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("if (ret == EvalResult::False) { stack.pop_back(); break; }");
-        sw.line("f.saved = ret; f.state = 4;");
-        sw.line("const BinaryOperator *BO = dyn_cast<BinaryOperator>(f.E);");
-        sw.line("stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: {");
-        sw.inc();
-        sw.line("if (ret == EvalResult::True) { stack.pop_back(); break; }");
-        sw.line("f.saved = ret; f.state = 5;");
-        sw.line("const BinaryOperator *BO = dyn_cast<BinaryOperator>(f.E);");
-        sw.line("stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 3: {");
-        sw.inc();
-        sw.line("if (ret == EvalResult::True) ret = EvalResult::False;");
-        sw.line("else if (ret == EvalResult::False) ret = EvalResult::True;");
-        sw.line("else ret = EvalResult::Unknown;");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 4: {");
-        sw.inc();
-        sw.line("if (f.saved == EvalResult::False || ret == EvalResult::False)");
-        sw.inc();
-        sw.line("ret = EvalResult::False;");
-        sw.dec();
-        sw.line("else if (f.saved == EvalResult::Unknown || ret == EvalResult::Unknown)");
-        sw.inc();
-        sw.line("ret = EvalResult::Unknown;");
-        sw.dec();
-        sw.line("else");
-        sw.inc();
-        sw.line("ret = EvalResult::True;");
-        sw.dec();
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 5: {");
-        sw.inc();
-        sw.line("if (f.saved == EvalResult::True || ret == EvalResult::True)");
-        sw.inc();
-        sw.line("ret = EvalResult::True;");
-        sw.dec();
-        sw.line("else if (f.saved == EvalResult::Unknown || ret == EvalResult::Unknown)");
-        sw.inc();
-        sw.line("ret = EvalResult::Unknown;");
-        sw.dec();
-        sw.line("else");
-        sw.inc();
-        sw.line("ret = EvalResult::False;");
-        sw.dec();
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-      });
-    });
-    b.line("return ret;");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Expr *", eName, "f.E");
+    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    {
+      auto boBlk = IRBuilder::block();
+      {
+        auto landBlk = IRBuilder::block();
+        EmitRaw(landBlk.get(),
+                "f.state = 1; stack.push_back({BO->getLHS(), 0, "
+                "EvalResult::Unknown}); break;");
+        AddStmt(boBlk.get(),
+                IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LAnd"),
+                               std::move(landBlk)));
+      }
+      {
+        auto lorBlk = IRBuilder::block();
+        EmitRaw(lorBlk.get(),
+                "f.state = 2; stack.push_back({BO->getLHS(), 0, "
+                "EvalResult::Unknown}); break;");
+        AddStmt(boBlk.get(),
+                IRBuilder::if_(IRExpr("BO->getOpcode() == BO_LOr"),
+                               std::move(lorBlk)));
+      }
+      EmitRaw(boBlk.get(), "int lhsVal = 0, rhsVal = 0;");
+      EmitVar(boBlk.get(), "bool", "lhsKnown",
+              "ExtractParamOrLiteral(BO->getLHS(), " + pName + ", " + vName +
+                  ", lhsVal)");
+      EmitVar(boBlk.get(), "bool", "rhsKnown",
+              "ExtractParamOrLiteral(BO->getRHS(), " + pName + ", " + vName +
+                  ", rhsVal)");
+      EmitRaw(boBlk.get(), "if (!lhsKnown || !rhsKnown) { ret = "
+                           "EvalResult::Unknown; stack.pop_back(); break; }");
+      auto opSw = IRBuilder::switch_(IRExpr("BO->getOpcode()"));
+      const std::pair<const char *, const char *> opCases[] = {
+          {"BO_EQ", "=="}, {"BO_NE", "!="}, {"BO_LT", "<"},
+          {"BO_GT", ">"},  {"BO_LE", "<="}, {"BO_GE", ">="},
+      };
+      for (const auto &oc : opCases) {
+        auto opBlk = IRBuilder::block();
+        EmitExpr(opBlk.get(), std::string("ret = (lhsVal ") + oc.second +
+                                  " rhsVal) ? EvalResult::True : "
+                                  "EvalResult::False");
+        AddStmt(opBlk.get(), IRBuilder::break_());
+        IRBuilder::case_(opSw.get(), {oc.first}, std::move(opBlk));
+      }
+      {
+        auto defBlk = IRBuilder::block();
+        EmitExpr(defBlk.get(), "ret = EvalResult::Unknown");
+        AddStmt(defBlk.get(), IRBuilder::break_());
+        IRBuilder::case_(opSw.get(), {}, std::move(defBlk));
+      }
+      AddStmt(boBlk.get(), std::move(opSw));
+      EmitRaw(boBlk.get(), "stack.pop_back(); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
+                                    "dyn_cast<BinaryOperator>(" +
+                                    eName + ")"),
+                             std::move(boBlk)));
+    }
+    {
+      auto uoBlk = IRBuilder::block();
+      {
+        auto lnotBlk = IRBuilder::block();
+        EmitRaw(lnotBlk.get(),
+                "f.state = 3; stack.push_back({UO->getSubExpr(), 0, "
+                "EvalResult::Unknown}); break;");
+        AddStmt(uoBlk.get(),
+                IRBuilder::if_(IRExpr("UO->getOpcode() == UO_LNot"),
+                               std::move(lnotBlk)));
+      }
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
+                                    "dyn_cast<UnaryOperator>(" +
+                                    eName + ")"),
+                             std::move(uoBlk)));
+    }
+    EmitRaw(c0.get(),
+            "ret = EvalResult::Unknown; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  {
+    auto c1 = IRBuilder::block();
+    EmitRaw(c1.get(),
+            "if (ret == EvalResult::False) { stack.pop_back(); break; }");
+    EmitRaw(c1.get(), "f.saved = ret; f.state = 4;");
+    EmitVar(c1.get(), "const BinaryOperator *", "BO",
+            "dyn_cast<BinaryOperator>(f.E)");
+    EmitRaw(c1.get(),
+            "stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
+    IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitRaw(c2.get(),
+            "if (ret == EvalResult::True) { stack.pop_back(); break; }");
+    EmitRaw(c2.get(), "f.saved = ret; f.state = 5;");
+    EmitVar(c2.get(), "const BinaryOperator *", "BO",
+            "dyn_cast<BinaryOperator>(f.E)");
+    EmitRaw(c2.get(),
+            "stack.push_back({BO->getRHS(), 0, EvalResult::Unknown}); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  {
+    auto c3 = IRBuilder::block();
+    AddStmt(c3.get(),
+            IRBuilder::if_(
+                IRExpr("ret == EvalResult::True"),
+                IRBuilder::expr(IRExpr("ret = EvalResult::False")),
+                IRBuilder::if_(
+                    IRExpr("ret == EvalResult::False"),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::True")),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")))));
+    EmitRaw(c3.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
+  }
+  {
+    auto c4 = IRBuilder::block();
+    AddStmt(c4.get(),
+            IRBuilder::if_(
+                IRExpr("f.saved == EvalResult::False || "
+                       "ret == EvalResult::False"),
+                IRBuilder::expr(IRExpr("ret = EvalResult::False")),
+                IRBuilder::if_(
+                    IRExpr("f.saved == EvalResult::Unknown || "
+                           "ret == EvalResult::Unknown"),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::True")))));
+    EmitRaw(c4.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"4"}, std::move(c4));
+  }
+  {
+    auto c5 = IRBuilder::block();
+    AddStmt(c5.get(),
+            IRBuilder::if_(
+                IRExpr("f.saved == EvalResult::True || "
+                       "ret == EvalResult::True"),
+                IRBuilder::expr(IRExpr("ret = EvalResult::True")),
+                IRBuilder::if_(
+                    IRExpr("f.saved == EvalResult::Unknown || "
+                           "ret == EvalResult::Unknown"),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::Unknown")),
+                    IRBuilder::expr(IRExpr("ret = EvalResult::False")))));
+    EmitRaw(c5.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"5"}, std::move(c5));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int EvalConditionRule::cost() const {
@@ -943,12 +1130,11 @@ CpsResult ParseLinearTermsRule::apply(
     const FunctionDecl *FD, const BodyAnalysis &BA,
     GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
-  e.line("#include <vector>");
-  e.line("#include <algorithm>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
+  b.include("vector");
+  b.include("algorithm");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string eName = FD->getParamDecl(0)->getNameAsString();
@@ -957,121 +1143,162 @@ CpsResult ParseLinearTermsRule::apply(
   std::string termsName = FD->getParamDecl(3)->getNameAsString();
   std::string maxName = FD->getParamDecl(4)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame {");
-    b.inc();
-    b.line("const Expr *E;");
-    b.line("int state;");
-    b.line("std::size_t terms_start;");
-    b.line("std::size_t rhs_start;");
-    b.line("int saved_max;");
-    b.dec();
-    b.line("};");
-    b.line("std::vector<Frame> stack;");
-    b.line("stack.push_back({" + eName + ", 0, " + termsName + ".size(), 0, " +
-            maxName + "});");
-    b.line(Ctx.RetType + " ret = false;");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Expr *" + eName + " = f.E;");
-        sw.line(eName + " = " + eName + "->IgnoreParenImpCasts();");
-        sw.line("if (const CallExpr *CE = dyn_cast<CallExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("if (const FunctionDecl *Callee = CE->getDirectCallee()) {");
-        sw.inc();
-        sw.line("if (Callee->getNameAsString() == " + funcName + ") {");
-        sw.inc();
-        sw.line("if (CE->getNumArgs() != 1) { ret = false; stack.pop_back(); break; }");
-        sw.line("const Expr *Arg = CE->getArg(0)->IgnoreParenImpCasts();");
-        sw.line("const BinaryOperator *BO = dyn_cast<BinaryOperator>(Arg);");
-        sw.line("if (!BO || BO->getOpcode() != BO_Sub) { ret = false; stack.pop_back(); break; }");
-        sw.line("const Expr *LHS = BO->getLHS()->IgnoreParenImpCasts();");
-        sw.line("const Expr *RHS = BO->getRHS()->IgnoreParenImpCasts();");
-        sw.line("const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(LHS);");
-        sw.line("if (!DRE || DRE->getDecl()->getNameAsString() != " + pName +
-                ") { ret = false; stack.pop_back(); break; }");
-        sw.line("const IntegerLiteral *IL = dyn_cast<IntegerLiteral>(RHS);");
-        sw.line("if (!IL) { ret = false; stack.pop_back(); break; }");
-        sw.line("int c = static_cast<int>(IL->getValue().getSExtValue());");
-        sw.line("if (c <= 0) { ret = false; stack.pop_back(); break; }");
-        sw.line(termsName + ".push_back({c, 1, const_cast<CallExpr *>(CE)});");
-        sw.line(maxName + " = std::max(" + maxName + ", c);");
-        sw.line("ret = true; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("if (UO->getOpcode() == UO_Minus) {");
-        sw.inc();
-        sw.line("f.terms_start = " + termsName + ".size(); f.saved_max = " + maxName + ";");
-        sw.line("f.state = 1; stack.push_back({UO->getSubExpr(), 0, 0, 0, 0}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("if (BO->getOpcode() != BO_Add && BO->getOpcode() != BO_Sub) { ret = false; stack.pop_back(); break; }");
-        sw.line("f.terms_start = " + termsName + ".size(); f.saved_max = " + maxName + ";");
-        sw.line("f.state = 2; stack.push_back({BO->getLHS(), 0, 0, 0, 0}); break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("ret = false; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  AddStmt(body.get(), FrameStruct({{"const Expr *", "E"},
+                                   {"int", "state"},
+                                   {"std::size_t", "terms_start"},
+                                   {"std::size_t", "rhs_start"},
+                                   {"int", "saved_max"}}));
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  EmitExpr(body.get(), "stack.push_back({" + eName + ", 0, " + termsName +
+                           ".size(), 0, " + maxName + "})");
+  EmitVar(body.get(), Ctx.RetType, "ret", "false");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("if (!ret) { stack.pop_back(); break; }");
-        sw.line("for (std::size_t i = f.terms_start; i < " + termsName +
-                ".size(); ++i)");
-        sw.inc();
-        sw.line(termsName + "[i].Sign = -" + termsName + "[i].Sign;");
-        sw.dec();
-        sw.line(maxName + " = std::max(f.saved_max, " + maxName + ");");
-        sw.line("ret = true; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: {");
-        sw.inc();
-        sw.line("if (!ret) { stack.pop_back(); break; }");
-        sw.line("f.rhs_start = " + termsName + ".size();");
-        sw.line("const BinaryOperator *BO = dyn_cast<BinaryOperator>(f.E);");
-        sw.line("f.state = 3; stack.push_back({BO->getRHS(), 0, 0, 0, 0}); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 3: {");
-        sw.inc();
-        sw.line("if (!ret) { stack.pop_back(); break; }");
-        sw.line("const BinaryOperator *BO = dyn_cast<BinaryOperator>(f.E);");
-        sw.line("if (BO->getOpcode() == BO_Sub) {");
-        sw.inc();
-        sw.line("for (std::size_t i = f.rhs_start; i < " + termsName +
-                ".size(); ++i)");
-        sw.inc();
-        sw.line(termsName + "[i].Sign = -" + termsName + "[i].Sign;");
-        sw.dec();
-        sw.dec();
-        sw.line("}");
-        sw.line(maxName + " = std::max({f.saved_max, " + maxName + "});");
-        sw.line("ret = true; stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-      });
-    });
-    b.line("return ret;");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Expr *", eName, "f.E");
+    EmitExpr(c0.get(), eName + " = " + eName + "->IgnoreParenImpCasts()");
+    {
+      auto ceBlk = IRBuilder::block();
+      {
+        auto calleeBlk = IRBuilder::block();
+        {
+          auto matchBlk = IRBuilder::block();
+          EmitRaw(matchBlk.get(), "if (CE->getNumArgs() != 1) { ret = false; "
+                                  "stack.pop_back(); break; }");
+          EmitVar(matchBlk.get(), "const Expr *", "Arg",
+                  "CE->getArg(0)->IgnoreParenImpCasts()");
+          EmitVar(matchBlk.get(), "const BinaryOperator *", "BO",
+                  "dyn_cast<BinaryOperator>(Arg)");
+          EmitRaw(matchBlk.get(), "if (!BO || BO->getOpcode() != BO_Sub) { "
+                                  "ret = false; stack.pop_back(); break; }");
+          EmitVar(matchBlk.get(), "const Expr *", "LHS",
+                  "BO->getLHS()->IgnoreParenImpCasts()");
+          EmitVar(matchBlk.get(), "const Expr *", "RHS",
+                  "BO->getRHS()->IgnoreParenImpCasts()");
+          EmitVar(matchBlk.get(), "const DeclRefExpr *", "DRE",
+                  "dyn_cast<DeclRefExpr>(LHS)");
+          EmitRaw(matchBlk.get(),
+                  "if (!DRE || DRE->getDecl()->getNameAsString() != " + pName +
+                      ") { ret = false; stack.pop_back(); break; }");
+          EmitVar(matchBlk.get(), "const IntegerLiteral *", "IL",
+                  "dyn_cast<IntegerLiteral>(RHS)");
+          EmitRaw(matchBlk.get(),
+                  "if (!IL) { ret = false; stack.pop_back(); break; }");
+          EmitVar(matchBlk.get(), "int", "c",
+                  "static_cast<int>(IL->getValue().getSExtValue())");
+          EmitRaw(matchBlk.get(),
+                  "if (c <= 0) { ret = false; stack.pop_back(); break; }");
+          EmitExpr(matchBlk.get(), termsName + ".push_back({c, 1, "
+                                               "const_cast<CallExpr *>(CE)})");
+          EmitExpr(matchBlk.get(),
+                   maxName + " = std::max(" + maxName + ", c)");
+          EmitRaw(matchBlk.get(), "ret = true; stack.pop_back(); break;");
+          AddStmt(calleeBlk.get(),
+                  IRBuilder::if_(
+                      IRExpr("Callee->getNameAsString() == " + funcName),
+                      std::move(matchBlk)));
+        }
+        AddStmt(ceBlk.get(),
+                IRBuilder::if_(IRExpr("const FunctionDecl *Callee = "
+                                      "CE->getDirectCallee()"),
+                               std::move(calleeBlk)));
+      }
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(" +
+                                    eName + ")"),
+                             std::move(ceBlk)));
+    }
+    {
+      auto uoBlk = IRBuilder::block();
+      {
+        auto minusBlk = IRBuilder::block();
+        EmitRaw(minusBlk.get(), "f.terms_start = " + termsName +
+                                    ".size(); f.saved_max = " + maxName + ";");
+        EmitRaw(minusBlk.get(), "f.state = 1; stack.push_back({UO->getSubExpr()"
+                                ", 0, 0, 0, 0}); break;");
+        AddStmt(uoBlk.get(),
+                IRBuilder::if_(IRExpr("UO->getOpcode() == UO_Minus"),
+                               std::move(minusBlk)));
+      }
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
+                                    "dyn_cast<UnaryOperator>(" +
+                                    eName + ")"),
+                             std::move(uoBlk)));
+    }
+    {
+      auto boBlk = IRBuilder::block();
+      EmitRaw(boBlk.get(), "if (BO->getOpcode() != BO_Add && "
+                           "BO->getOpcode() != BO_Sub) { ret = false; "
+                           "stack.pop_back(); break; }");
+      EmitRaw(boBlk.get(), "f.terms_start = " + termsName +
+                               ".size(); f.saved_max = " + maxName + ";");
+      EmitRaw(boBlk.get(), "f.state = 2; stack.push_back({BO->getLHS(), 0, 0, "
+                           "0, 0}); break;");
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
+                                    "dyn_cast<BinaryOperator>(" +
+                                    eName + ")"),
+                             std::move(boBlk)));
+    }
+    EmitRaw(c0.get(), "ret = false; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  {
+    auto c1 = IRBuilder::block();
+    EmitRaw(c1.get(), "if (!ret) { stack.pop_back(); break; }");
+    AddStmt(c1.get(),
+            IRBuilder::for_("std::size_t i = f.terms_start",
+                            IRExpr("i < " + termsName + ".size()"), "++i",
+                            IRBuilder::expr(IRExpr(termsName +
+                                                   "[i].Sign = -" + termsName +
+                                                   "[i].Sign"))));
+    EmitExpr(c1.get(), maxName + " = std::max(f.saved_max, " + maxName + ")");
+    EmitRaw(c1.get(), "ret = true; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitRaw(c2.get(), "if (!ret) { stack.pop_back(); break; }");
+    EmitExpr(c2.get(), "f.rhs_start = " + termsName + ".size()");
+    EmitVar(c2.get(), "const BinaryOperator *", "BO",
+            "dyn_cast<BinaryOperator>(f.E)");
+    EmitRaw(c2.get(), "f.state = 3; stack.push_back({BO->getRHS(), 0, 0, 0, "
+                      "0}); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  {
+    auto c3 = IRBuilder::block();
+    EmitRaw(c3.get(), "if (!ret) { stack.pop_back(); break; }");
+    EmitVar(c3.get(), "const BinaryOperator *", "BO",
+            "dyn_cast<BinaryOperator>(f.E)");
+    {
+      auto subBlk = IRBuilder::block();
+      AddStmt(subBlk.get(),
+              IRBuilder::for_("std::size_t i = f.rhs_start",
+                              IRExpr("i < " + termsName + ".size()"), "++i",
+                              IRBuilder::expr(IRExpr(termsName +
+                                                     "[i].Sign = -" +
+                                                     termsName + "[i].Sign"))));
+      AddStmt(c3.get(),
+              IRBuilder::if_(IRExpr("BO->getOpcode() == BO_Sub"),
+                             std::move(subBlk)));
+    }
+    EmitExpr(c3.get(),
+             maxName + " = std::max({f.saved_max, " + maxName + "})");
+    EmitRaw(c3.get(), "ret = true; stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(), IRBuilder::ret(IRExpr("ret")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int ParseLinearTermsRule::cost() const {
@@ -1081,6 +1308,5 @@ int ParseLinearTermsRule::cost() const {
 const char *ParseLinearTermsRule::name() const {
   return RuleCatalog::ParseLinearTerms.Name;
 }
-
 
 } // namespace cps

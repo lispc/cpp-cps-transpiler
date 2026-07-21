@@ -1,7 +1,7 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "stack_machine_codegen.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -123,47 +123,60 @@ CpsResult BinaryStackRule::apply(const FunctionDecl *FD,
     return s;
   };
 
-  CodeEmitter e;
-  StackMachineCodegen smg(e, Ctx.FuncName, Ctx.RetType);
-  smg.emitBanner("binary-stack", Ctx.FuncName);
-  smg.emitIncludes();
+  IRBuilder b;
+  StackMachineCodegen smg(Ctx.FuncName, Ctx.RetType);
+  smg.emitBanner(b, "binary-stack", Ctx.FuncName);
+  smg.emitIncludes(b);
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
   for (unsigned i = 0; i < FD->getNumParams(); ++i)
     smg.addParam(FD->getParamDecl(i));
-  smg.emitFrameStruct();
+  smg.emitFrameStruct(b);
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("std::vector<" + smg.frameName() + "> " + smg.stackName() + ";");
-    b.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-           buildInitArgs() + "));");
-    b.line(Ctx.RetType + " result = " + identity + ";");
-    smg.emitSimpleLoop([&](CodeEmitter &w) {
-      EmitStmts(w, BA.LeadingStmts, Ctx.ASTCtx);
-      for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-        std::string prefix = (bi == 0) ? "if (" : "else if (";
-        const auto &bc = BA.BaseCases[bi];
-        w.line(prefix + replaceCurCond(bc) + ") {");
-        w.inc();
-        w.line(combine + replaceCurValue(bc) + ";");
-        w.dec();
-        w.line("}");
-      }
-      w.line("else {");
-      w.inc();
-      EmitStmts(w, BA.MiddleStmts, Ctx.ASTCtx);
-      w.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-             buildPushArgs(RightCall) + "));");
-      w.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-             buildPushArgs(LeftCall) + "));");
-      w.dec();
-      w.line("}");
-    });
-    b.line("return result;");
+  auto body = IRBuilder::block();
+  IRBuilder::add(
+      body.get(),
+      IRBuilder::var("std::vector<" + smg.frameName() + ">", smg.stackName()));
+  IRBuilder::add(body.get(),
+                 IRBuilder::expr(IRExpr(smg.stackName() + ".emplace_back(" +
+                                        smg.frameName() + "(" +
+                                        buildInitArgs() + "))")));
+  IRBuilder::add(body.get(),
+                 IRBuilder::var(Ctx.RetType, "result", IRExpr(identity)));
+
+  smg.emitSimpleLoop(body.get(), [&](IRBlock *w) {
+    EmitStmtsToIR(b, w, BA.LeadingStmts, Ctx.ASTCtx);
+
+    // else branch: middle statements + push both recursive calls.
+    auto elseBlk = IRBuilder::block();
+    EmitStmtsToIR(b, elseBlk.get(), BA.MiddleStmts, Ctx.ASTCtx);
+    IRBuilder::add(elseBlk.get(),
+                   IRBuilder::expr(IRExpr(smg.stackName() + ".emplace_back(" +
+                                          smg.frameName() + "(" +
+                                          buildPushArgs(RightCall) + "))")));
+    IRBuilder::add(elseBlk.get(),
+                   IRBuilder::expr(IRExpr(smg.stackName() + ".emplace_back(" +
+                                          smg.frameName() + "(" +
+                                          buildPushArgs(LeftCall) + "))")));
+
+    // Fold the base cases into an if / else-if / else chain.
+    std::unique_ptr<IRStmt> chain = std::move(elseBlk);
+    for (size_t bi = BA.BaseCases.size(); bi-- > 0;) {
+      const auto &bc = BA.BaseCases[bi];
+      auto thenBlk = IRBuilder::block();
+      IRBuilder::add(thenBlk.get(),
+                     IRBuilder::expr(IRExpr(combine + replaceCurValue(bc))));
+      chain = IRBuilder::if_(IRExpr(replaceCurCond(bc)), std::move(thenBlk),
+                             std::move(chain));
+    }
+    IRBuilder::add(w, std::move(chain));
   });
 
-  return e.str();
+  IRBuilder::add(body.get(), IRBuilder::ret(IRExpr("result")));
+  b.function(sig, std::move(body));
+
+  return PrintGeneratedUnit(b.unit);
 }
 
 int BinaryStackRule::cost() const { return RuleCatalog::BinaryStack.Cost; }

@@ -1,7 +1,7 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
@@ -75,7 +75,6 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
                                    const BodyAnalysis &BA,
                                    GenContext &Ctx) const {
   const std::string &pName = Ctx.ParamNames[0];
-  std::string pType = GetParamStorageType(FD->getParamDecl(0));
 
   std::vector<CallExpr *> holes;
   CollectHoles(BA.RecExpr, Ctx.FuncName, holes);
@@ -91,55 +90,68 @@ CpsResult MemoizationRule::apply(const FunctionDecl *FD,
   std::string loopExpr =
       StripOuterParens(PrintExprWithReplacements(BA.RecExpr, repls, Ctx.ASTCtx));
 
-  CodeEmitter e;
-  e.raw("// === Generated memoized code for function: " + Ctx.FuncName +
-        " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated memoized code for function: " + Ctx.FuncName +
+            " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   const ParmVarDecl *Param = FD->getParamDecl(0);
 
-  e.block(sig, [&](CodeEmitter &b) {
-    // Early base-case return for small inputs.
-    b.block("if (" + pName + " <= " + std::to_string(maxOffset - 1) + ")",
-            [&](CodeEmitter &iw) {
-              for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-                std::string prefix = (bi == 0) ? "if (" : "else if (";
-                const auto &bc = BA.BaseCases[bi];
-                std::string condStr =
-                    bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
-                std::string valStr =
-                    bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
-                iw.line(prefix + condStr + ") return " + valStr + ";");
-              }
-              iw.line("return 0;");
-            });
+  auto body = IRBuilder::block();
 
-    b.line("std::vector<" + Ctx.RetType + "> dp(" + pName + " + 1);");
+  // Early base-case return for small inputs.
+  {
+    auto earlyBlk = IRBuilder::block();
+    std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>> branches;
+    for (const auto &bc : BA.BaseCases) {
+      std::string condStr =
+          bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
+      std::string valStr =
+          bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+      auto thenBlk = IRBuilder::block();
+      IRBuilder::add(thenBlk.get(), IRBuilder::ret(IRExpr(valStr)));
+      branches.emplace_back(std::move(condStr), std::move(thenBlk));
+    }
+    IRBuilder::add(earlyBlk.get(),
+                   IRBuilder::ifChain(std::move(branches)));
+    IRBuilder::add(earlyBlk.get(), IRBuilder::ret(IRExpr("0")));
+    IRBuilder::add(body.get(),
+                   IRBuilder::if_(IRExpr(pName + " <= " +
+                                         std::to_string(maxOffset - 1)),
+                                  std::move(earlyBlk)));
+  }
 
-    for (int i = 0; i < maxOffset; ++i) {
-      for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-        if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, i) ==
-            EvalResult::True) {
-          std::string baseExpr = ReplaceParamWithLiteral(
-              BA.BaseCases[bi].ValueExpr, Param, std::to_string(i),
-              Ctx.ASTCtx);
-          b.line("dp[" + std::to_string(i) + "] = " + baseExpr + ";");
-          break;
-        }
+  IRBuilder::add(body.get(),
+                 IRBuilder::rawStmt("std::vector<" + Ctx.RetType + "> dp(" +
+                                    pName + " + 1);"));
+
+  for (int i = 0; i < maxOffset; ++i) {
+    for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
+      if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, i) ==
+          EvalResult::True) {
+        std::string baseExpr = ReplaceParamWithLiteral(
+            BA.BaseCases[bi].ValueExpr, Param, std::to_string(i), Ctx.ASTCtx);
+        IRBuilder::add(body.get(),
+                       IRBuilder::expr(IRExpr("dp[" + std::to_string(i) +
+                                              "] = " + baseExpr)));
+        break;
       }
     }
+  }
 
-    b.block("for (int i = " + std::to_string(maxOffset) + "; i <= " +
-                pName + "; ++i)",
-            [&](CodeEmitter &fw) {
-              fw.line("dp[i] = " + loopExpr + ";");
-            });
-    b.line("return dp[" + pName + "];");
-  });
+  auto forBody = IRBuilder::block();
+  IRBuilder::add(forBody.get(),
+                 IRBuilder::expr(IRExpr("dp[i] = " + loopExpr)));
+  IRBuilder::add(body.get(),
+                 IRBuilder::for_("int i = " + std::to_string(maxOffset),
+                                 IRExpr("i <= " + pName), "++i",
+                                 std::move(forBody)));
+  IRBuilder::add(body.get(),
+                 IRBuilder::ret(IRExpr("dp[" + pName + "]")));
 
-  return e.str();
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int MemoizationRule::cost() const { return RuleCatalog::Memoization.Cost; }

@@ -1,5 +1,4 @@
 #include "cps_generator.h"
-#include "code_emitter.h"
 #include "output_ir.h"
 #include "transformation_rule.h"
 #include "transformation_rules.h"
@@ -80,20 +79,6 @@ std::string ArgCtorDefun(const std::vector<std::string> &ParamValues,
   return s;
 }
 
-std::string Indent(const std::string &s, int n) {
-  std::string prefix(n, ' ');
-  std::string result;
-  bool first = true;
-  std::istringstream iss(s);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (!first) result += "\n";
-    result += prefix + line;
-    first = false;
-  }
-  return result;
-}
-
 std::string ReplaceParamsWithCur(const Expr *E, const GenContext &Ctx) {
   std::unordered_map<const ValueDecl *, std::string> repls;
   for (const ParmVarDecl *P : Ctx.Params)
@@ -119,18 +104,6 @@ std::string ReplaceParamWithLiteral(const Expr *E, const ParmVarDecl *Param,
   return PrintExprWithDeclReplacements(E, repls, Ctx);
 }
 
-void EmitStmts(CodeEmitter &e, const std::vector<const Stmt *> &Stmts,
-               const ASTContext *Ctx) {
-  for (const Stmt *S : Stmts) {
-    std::string line = PrintStmt(S, Ctx);
-    // Clang's printPretty does not append a semicolon when printing an Expr
-    // that happens to be used as a full statement. Add it manually.
-    if (isa<Expr>(S) && !line.empty() && line.back() != ';')
-      line += ';';
-    e.line(line);
-  }
-}
-
 void EmitStmtsToIR(IRBuilder &builder, IRBlock *blk,
                    const std::vector<const Stmt *> &Stmts,
                    const ASTContext *Ctx) {
@@ -142,64 +115,12 @@ void EmitStmtsToIR(IRBuilder &builder, IRBlock *blk,
   }
 }
 
-void EmitUnpacksDefun(CodeEmitter &e, const std::string &ArgName,
+void EmitUnpacksDefun(IRBlock *blk, const std::string &ArgName,
                       const GenContext &Ctx) {
   for (const auto &p : Ctx.ParamNames) {
-    e.line("auto " + p + " = " + ArgName + "." + p + ";");
+    IRBuilder::add(blk, IRBuilder::var("auto", p,
+                                       IRExpr(ArgName + "." + p)));
   }
-}
-
-std::string EmitFrameStruct(CodeEmitter &e, const FunctionDecl *FD,
-                            const GenContext &Ctx) {
-  return EmitFrameStruct(e, FD, Ctx, {});
-}
-
-std::string EmitFrameStruct(CodeEmitter &e, const FunctionDecl *FD,
-                            const GenContext &Ctx,
-                            const std::vector<const VarDecl *> &ExtraFields) {
-  std::string frameName = Ctx.FuncName + "Frame";
-  e.block("struct " + frameName, [&](CodeEmitter &b) {
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
-             FD->getParamDecl(i)->getNameAsString() + ";");
-    }
-    for (const VarDecl *VD : ExtraFields)
-      b.line(NormalizeTypeName(VD->getType().getAsString()) + " " +
-             VD->getNameAsString() + ";");
-    std::string ctor = frameName + "(";
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (i > 0)
-        ctor += ", ";
-      ctor += GetParamStorageType(FD->getParamDecl(i)) + " " +
-              FD->getParamDecl(i)->getNameAsString() + "_";
-    }
-    for (const VarDecl *VD : ExtraFields) {
-      if (!ctor.empty() && ctor.back() != '(')
-        ctor += ", ";
-      ctor += NormalizeTypeName(VD->getType().getAsString()) + " " +
-              VD->getNameAsString() + "_";
-    }
-    ctor += ")";
-    std::string init;
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      std::string p = FD->getParamDecl(i)->getNameAsString();
-      if (!init.empty())
-        init += ", ";
-      init += p + "(" + p + "_)";
-    }
-    for (const VarDecl *VD : ExtraFields) {
-      std::string n = VD->getNameAsString();
-      if (!init.empty())
-        init += ", ";
-      init += n + "(" + n + "_)";
-    }
-    if (!init.empty())
-      ctor += " : " + init;
-    ctor += " {}";
-    b.line(ctor);
-  }, ";");
-  e.nl();
-  return frameName;
 }
 
 // ============================================================

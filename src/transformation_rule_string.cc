@@ -1,7 +1,7 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
@@ -100,6 +100,29 @@ void CollectDerivedVariables(const Stmt *S, const std::string &ParamName,
     CollectDerivedVariables(Child, ParamName, Derived, Ctx);
 }
 
+// Small local conveniences over IRBuilder for the leaf statements this rule
+// emits (mirrors transformation_rule_structural_subrules.cc).
+
+void AddStmt(IRBlock *blk, std::unique_ptr<IRStmt> s) {
+  IRBuilder::add(blk, std::move(s));
+}
+
+// Add an expression statement (the IR printer appends the semicolon).
+void EmitExpr(IRBlock *blk, const std::string &e) {
+  AddStmt(blk, IRBuilder::expr(IRExpr(e)));
+}
+
+// Add a raw statement line; the text must carry its own semicolons.
+void EmitRaw(IRBlock *blk, const std::string &text) {
+  AddStmt(blk, IRBuilder::rawStmt(text));
+}
+
+// Add a `type name = init;` variable declaration.
+void EmitVar(IRBlock *blk, const std::string &type, const std::string &name,
+             const std::string &init) {
+  AddStmt(blk, IRBuilder::var(type, name, IRExpr(init)));
+}
+
 bool IsStringStructuralRecursionShape(const FunctionDecl *FD,
                                       const GenContext &Ctx) {
   if (!TypeContains(Ctx.RetType, "string"))
@@ -174,213 +197,276 @@ CpsResult StringStructuralRecursionRule::apply(const FunctionDecl *FD,
                                                  const BodyAnalysis &BA,
                                                  GenContext &Ctx) const {
   (void)BA;
-  CodeEmitter e;
-  e.raw("// === Generated structural-recursion code for function: " +
-        Ctx.FuncName + " ===\n\n");
+  IRBuilder b;
+  b.comment("=== Generated structural-recursion code for function: " +
+            Ctx.FuncName + " ===");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   std::string eName = FD->getParamDecl(0)->getNameAsString();
   std::string replsName = FD->getParamDecl(1)->getNameAsString();
   std::string ctxName = FD->getParamDecl(2)->getNameAsString();
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.line("struct Frame {");
-    b.inc();
-    b.line("const Expr *E;");
-    b.line("int state;");
-    b.line("std::string s1;");
-    b.line("std::string s2;");
-    b.line("bool b;");
-    b.line("unsigned count;");
-    b.dec();
-    b.line("};");
-    b.line("std::vector<Frame> stack;");
-    b.line("std::vector<std::string> values;");
-    b.line("stack.push_back({" + eName + ", 0, \"\", \"\", false, 0});");
-    b.block("while (!stack.empty())", [&](CodeEmitter &w) {
-      w.line("Frame &f = stack.back();");
-      w.block("switch (f.state)", [&](CodeEmitter &sw) {
-        sw.line("case 0: {");
-        sw.inc();
-        sw.line("const Expr *" + eName + " = f.E;");
-        sw.line("if (!" + eName + ") { values.push_back(\"\"); stack.pop_back(); break; }");
-        sw.line("auto It = " + replsName + ".find(" + eName + ");");
-        sw.line("if (It != " + replsName + ".end()) { values.push_back(It->second); stack.pop_back(); break; }");
-        sw.line("if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 1; f.s1 = BO->getOpcodeStr().str();");
-        sw.line("stack.push_back({BO->getRHS(), 0, \"\", \"\", false, 0});");
-        sw.line("stack.push_back({BO->getLHS(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 2; f.s1 = UO->getOpcodeStr(UO->getOpcode()).str(); f.b = UO->isPostfix();");
-        sw.line("stack.push_back({UO->getSubExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const CallExpr *CE = dyn_cast<CallExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 3; f.count = CE->getNumArgs();");
-        sw.line("const Expr *Callee = CE->getCallee();");
-        sw.line("f.b = (Callee != nullptr);");
-        sw.line("if (Callee) stack.push_back({Callee, 0, \"\", \"\", false, 0});");
-        sw.line("for (int i = static_cast<int>(f.count) - 1; i >= 0; --i)");
-        sw.inc();
-        sw.line("stack.push_back({CE->getArg(i), 0, \"\", \"\", false, 0});");
-        sw.dec();
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const ConditionalOperator *CO = dyn_cast<ConditionalOperator>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 4; f.count = 3;");
-        sw.line("stack.push_back({CO->getFalseExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("stack.push_back({CO->getTrueExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("stack.push_back({CO->getCond(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const ArraySubscriptExpr *ASE = dyn_cast<ArraySubscriptExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 5;");
-        sw.line("stack.push_back({ASE->getIdx(), 0, \"\", \"\", false, 0});");
-        sw.line("stack.push_back({ASE->getBase(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const MemberExpr *ME = dyn_cast<MemberExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 6; f.s1 = ME->getMemberNameInfo().getAsString(); f.b = ME->isArrow();");
-        sw.line("stack.push_back({ME->getBase(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const ParenExpr *PE = dyn_cast<ParenExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 7;");
-        sw.line("stack.push_back({PE->getSubExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 8;");
-        sw.line("stack.push_back({ICE->getSubExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("if (const CStyleCastExpr *CCE = dyn_cast<CStyleCastExpr>(" + eName + ")) {");
-        sw.inc();
-        sw.line("f.state = 9; f.s1 = CCE->getTypeAsWritten().getAsString();");
-        sw.line("stack.push_back({CCE->getSubExpr(), 0, \"\", \"\", false, 0});");
-        sw.line("break;");
-        sw.dec();
-        sw.line("}");
-        sw.line("values.push_back(PrintExpr(" + eName + ", " + ctxName + "));");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
+  auto body = IRBuilder::block();
+  {
+    IRStructData frame;
+    frame.name = "Frame";
+    frame.fields = {{"const Expr *", "E"}, {"int", "state"},
+                    {"std::string", "s1"}, {"std::string", "s2"},
+                    {"bool", "b"},         {"unsigned", "count"}};
+    AddStmt(body.get(), IRBuilder::localStruct(std::move(frame)));
+  }
+  AddStmt(body.get(), IRBuilder::var("std::vector<Frame>", "stack"));
+  AddStmt(body.get(), IRBuilder::var("std::vector<std::string>", "values"));
+  EmitExpr(body.get(),
+           "stack.push_back({" + eName + ", 0, \"\", \"\", false, 0})");
 
-        sw.line("case 1: {");
-        sw.inc();
-        sw.line("std::string rhs = values.back(); values.pop_back();");
-        sw.line("std::string lhs = values.back(); values.pop_back();");
-        sw.line("values.push_back(\"(\" + lhs + \" \" + f.s1 + \" \" + rhs + \")\");");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 2: {");
-        sw.inc();
-        sw.line("std::string sub = values.back(); values.pop_back();");
-        sw.line("if (!f.b) values.push_back(f.s1 + \"(\" + sub + \")\");");
-        sw.line("else values.push_back(\"(\" + sub + \")\" + f.s1);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 3: {");
-        sw.inc();
-        sw.line("std::vector<std::string> args(f.count);");
-        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
-        sw.inc();
-        sw.line("args[i] = values.back(); values.pop_back();");
-        sw.dec();
-        sw.line("}");
-        sw.line("std::string callee;");
-        sw.line("if (f.b) { callee = values.back(); values.pop_back(); }");
-        sw.line("std::string s = callee + \"(\";");
-        sw.line("for (unsigned i = 0; i < f.count; ++i) {");
-        sw.inc();
-        sw.line("if (i > 0) s += \", \";");
-        sw.line("s += args[i];");
-        sw.dec();
-        sw.line("}");
-        sw.line("s += \")\";");
-        sw.line("values.push_back(s);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 4: {");
-        sw.inc();
-        sw.line("std::string falseExpr = values.back(); values.pop_back();");
-        sw.line("std::string trueExpr = values.back(); values.pop_back();");
-        sw.line("std::string cond = values.back(); values.pop_back();");
-        sw.line("values.push_back(\"(\" + cond + \" ? \" + trueExpr + \" : \" + falseExpr + \")\");");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 5: {");
-        sw.inc();
-        sw.line("std::string idx = values.back(); values.pop_back();");
-        sw.line("std::string base = values.back(); values.pop_back();");
-        sw.line("values.push_back(base + \"[\" + idx + \"]\");");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 6: {");
-        sw.inc();
-        sw.line("std::string base = values.back(); values.pop_back();");
-        sw.line("values.push_back(base + (f.b ? \"->\" : \".\") + f.s1);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 7: {");
-        sw.inc();
-        sw.line("std::string sub = values.back(); values.pop_back();");
-        sw.line("values.push_back(\"(\" + sub + \")\");");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 8: {");
-        sw.inc();
-        sw.line("std::string sub = values.back(); values.pop_back();");
-        sw.line("values.push_back(sub);");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-
-        sw.line("case 9: {");
-        sw.inc();
-        sw.line("std::string sub = values.back(); values.pop_back();");
-        sw.line("values.push_back(\"(\" + f.s1 + \")(\" + sub + \")\");");
-        sw.line("stack.pop_back(); break;");
-        sw.dec();
-        sw.line("}");
-      });
-    });
-    b.line("return values.empty() ? \"\" : values.back();");
-  });
-
-  return e.str();
+  auto w = IRBuilder::block();
+  EmitVar(w.get(), "Frame &", "f", "stack.back()");
+  auto sw = IRBuilder::switch_(IRExpr("f.state"));
+  {
+    auto c0 = IRBuilder::block();
+    EmitVar(c0.get(), "const Expr *", eName, "f.E");
+    EmitRaw(c0.get(), "if (!" + eName +
+                          ") { values.push_back(\"\"); stack.pop_back(); "
+                          "break; }");
+    EmitVar(c0.get(), "auto", "It", replsName + ".find(" + eName + ")");
+    EmitRaw(c0.get(), "if (It != " + replsName +
+                          ".end()) { values.push_back(It->second); "
+                          "stack.pop_back(); break; }");
+    {
+      auto boBlk = IRBuilder::block();
+      EmitRaw(boBlk.get(), "f.state = 1; f.s1 = BO->getOpcodeStr().str();");
+      EmitExpr(boBlk.get(),
+               "stack.push_back({BO->getRHS(), 0, \"\", \"\", false, 0})");
+      EmitExpr(boBlk.get(),
+               "stack.push_back({BO->getLHS(), 0, \"\", \"\", false, 0})");
+      AddStmt(boBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const BinaryOperator *BO = "
+                                    "dyn_cast<BinaryOperator>(" +
+                                    eName + ")"),
+                             std::move(boBlk)));
+    }
+    {
+      auto uoBlk = IRBuilder::block();
+      EmitRaw(uoBlk.get(),
+              "f.state = 2; f.s1 = UO->getOpcodeStr(UO->getOpcode()).str(); "
+              "f.b = UO->isPostfix();");
+      EmitExpr(uoBlk.get(),
+               "stack.push_back({UO->getSubExpr(), 0, \"\", \"\", false, 0})");
+      AddStmt(uoBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const UnaryOperator *UO = "
+                                    "dyn_cast<UnaryOperator>(" +
+                                    eName + ")"),
+                             std::move(uoBlk)));
+    }
+    {
+      auto ceBlk = IRBuilder::block();
+      EmitRaw(ceBlk.get(), "f.state = 3; f.count = CE->getNumArgs();");
+      EmitVar(ceBlk.get(), "const Expr *", "Callee", "CE->getCallee()");
+      EmitRaw(ceBlk.get(), "f.b = (Callee != nullptr);");
+      EmitRaw(ceBlk.get(),
+              "if (Callee) stack.push_back({Callee, 0, \"\", \"\", false, "
+              "0});");
+      AddStmt(ceBlk.get(),
+              IRBuilder::for_("int i = static_cast<int>(f.count) - 1",
+                              IRExpr("i >= 0"), "--i",
+                              IRBuilder::expr(IRExpr(
+                                  "stack.push_back({CE->getArg(i), 0, \"\", "
+                                  "\"\", false, 0})"))));
+      AddStmt(ceBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CallExpr *CE = dyn_cast<CallExpr>(" +
+                                    eName + ")"),
+                             std::move(ceBlk)));
+    }
+    {
+      auto coBlk = IRBuilder::block();
+      EmitRaw(coBlk.get(), "f.state = 4; f.count = 3;");
+      EmitExpr(coBlk.get(), "stack.push_back({CO->getFalseExpr(), 0, \"\", "
+                            "\"\", false, 0})");
+      EmitExpr(coBlk.get(), "stack.push_back({CO->getTrueExpr(), 0, \"\", "
+                            "\"\", false, 0})");
+      EmitExpr(coBlk.get(), "stack.push_back({CO->getCond(), 0, \"\", \"\", "
+                            "false, 0})");
+      AddStmt(coBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ConditionalOperator *CO = "
+                                    "dyn_cast<ConditionalOperator>(" +
+                                    eName + ")"),
+                             std::move(coBlk)));
+    }
+    {
+      auto aseBlk = IRBuilder::block();
+      EmitRaw(aseBlk.get(), "f.state = 5;");
+      EmitExpr(aseBlk.get(), "stack.push_back({ASE->getIdx(), 0, \"\", \"\", "
+                             "false, 0})");
+      EmitExpr(aseBlk.get(), "stack.push_back({ASE->getBase(), 0, \"\", \"\", "
+                             "false, 0})");
+      AddStmt(aseBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ArraySubscriptExpr *ASE = "
+                                    "dyn_cast<ArraySubscriptExpr>(" +
+                                    eName + ")"),
+                             std::move(aseBlk)));
+    }
+    {
+      auto meBlk = IRBuilder::block();
+      EmitRaw(meBlk.get(),
+              "f.state = 6; f.s1 = ME->getMemberNameInfo().getAsString(); "
+              "f.b = ME->isArrow();");
+      EmitExpr(meBlk.get(),
+               "stack.push_back({ME->getBase(), 0, \"\", \"\", false, 0})");
+      AddStmt(meBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const MemberExpr *ME = "
+                                    "dyn_cast<MemberExpr>(" +
+                                    eName + ")"),
+                             std::move(meBlk)));
+    }
+    {
+      auto peBlk = IRBuilder::block();
+      EmitRaw(peBlk.get(), "f.state = 7;");
+      EmitExpr(peBlk.get(),
+               "stack.push_back({PE->getSubExpr(), 0, \"\", \"\", false, 0})");
+      AddStmt(peBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ParenExpr *PE = "
+                                    "dyn_cast<ParenExpr>(" +
+                                    eName + ")"),
+                             std::move(peBlk)));
+    }
+    {
+      auto iceBlk = IRBuilder::block();
+      EmitRaw(iceBlk.get(), "f.state = 8;");
+      EmitExpr(iceBlk.get(),
+               "stack.push_back({ICE->getSubExpr(), 0, \"\", \"\", false, "
+               "0})");
+      AddStmt(iceBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const ImplicitCastExpr *ICE = "
+                                    "dyn_cast<ImplicitCastExpr>(" +
+                                    eName + ")"),
+                             std::move(iceBlk)));
+    }
+    {
+      auto cceBlk = IRBuilder::block();
+      EmitRaw(cceBlk.get(),
+              "f.state = 9; f.s1 = CCE->getTypeAsWritten().getAsString();");
+      EmitExpr(cceBlk.get(),
+               "stack.push_back({CCE->getSubExpr(), 0, \"\", \"\", false, "
+               "0})");
+      AddStmt(cceBlk.get(), IRBuilder::break_());
+      AddStmt(c0.get(),
+              IRBuilder::if_(IRExpr("const CStyleCastExpr *CCE = "
+                                    "dyn_cast<CStyleCastExpr>(" +
+                                    eName + ")"),
+                             std::move(cceBlk)));
+    }
+    EmitExpr(c0.get(),
+             "values.push_back(PrintExpr(" + eName + ", " + ctxName + "))");
+    EmitRaw(c0.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"0"}, std::move(c0));
+  }
+  {
+    auto c1 = IRBuilder::block();
+    EmitRaw(c1.get(), "std::string rhs = values.back(); values.pop_back();");
+    EmitRaw(c1.get(), "std::string lhs = values.back(); values.pop_back();");
+    EmitExpr(c1.get(), "values.push_back(\"(\" + lhs + \" \" + f.s1 + \" \" + "
+                       "rhs + \")\")");
+    EmitRaw(c1.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"1"}, std::move(c1));
+  }
+  {
+    auto c2 = IRBuilder::block();
+    EmitRaw(c2.get(), "std::string sub = values.back(); values.pop_back();");
+    EmitRaw(c2.get(), "if (!f.b) values.push_back(f.s1 + \"(\" + sub + \")\");");
+    EmitRaw(c2.get(), "else values.push_back(\"(\" + sub + \")\" + f.s1);");
+    EmitRaw(c2.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"2"}, std::move(c2));
+  }
+  {
+    auto c3 = IRBuilder::block();
+    EmitRaw(c3.get(), "std::vector<std::string> args(f.count);");
+    {
+      auto argLoop = IRBuilder::block();
+      EmitRaw(argLoop.get(), "args[i] = values.back(); values.pop_back();");
+      AddStmt(c3.get(),
+              IRBuilder::for_("unsigned i = 0", IRExpr("i < f.count"), "++i",
+                              std::move(argLoop)));
+    }
+    AddStmt(c3.get(), IRBuilder::var("std::string", "callee"));
+    EmitRaw(c3.get(), "if (f.b) { callee = values.back(); values.pop_back(); }");
+    EmitVar(c3.get(), "std::string", "s", "callee + \"(\"");
+    {
+      auto buildLoop = IRBuilder::block();
+      EmitRaw(buildLoop.get(), "if (i > 0) s += \", \";");
+      EmitExpr(buildLoop.get(), "s += args[i]");
+      AddStmt(c3.get(),
+              IRBuilder::for_("unsigned i = 0", IRExpr("i < f.count"), "++i",
+                              std::move(buildLoop)));
+    }
+    EmitExpr(c3.get(), "s += \")\"");
+    EmitExpr(c3.get(), "values.push_back(s)");
+    EmitRaw(c3.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"3"}, std::move(c3));
+  }
+  {
+    auto c4 = IRBuilder::block();
+    EmitRaw(c4.get(), "std::string falseExpr = values.back(); "
+                      "values.pop_back();");
+    EmitRaw(c4.get(), "std::string trueExpr = values.back(); "
+                      "values.pop_back();");
+    EmitRaw(c4.get(), "std::string cond = values.back(); values.pop_back();");
+    EmitExpr(c4.get(), "values.push_back(\"(\" + cond + \" ? \" + trueExpr + "
+                       "\" : \" + falseExpr + \")\")");
+    EmitRaw(c4.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"4"}, std::move(c4));
+  }
+  {
+    auto c5 = IRBuilder::block();
+    EmitRaw(c5.get(), "std::string idx = values.back(); values.pop_back();");
+    EmitRaw(c5.get(), "std::string base = values.back(); values.pop_back();");
+    EmitExpr(c5.get(), "values.push_back(base + \"[\" + idx + \"]\")");
+    EmitRaw(c5.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"5"}, std::move(c5));
+  }
+  {
+    auto c6 = IRBuilder::block();
+    EmitRaw(c6.get(), "std::string base = values.back(); values.pop_back();");
+    EmitExpr(c6.get(), "values.push_back(base + (f.b ? \"->\" : \".\") + f.s1)");
+    EmitRaw(c6.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"6"}, std::move(c6));
+  }
+  {
+    auto c7 = IRBuilder::block();
+    EmitRaw(c7.get(), "std::string sub = values.back(); values.pop_back();");
+    EmitExpr(c7.get(), "values.push_back(\"(\" + sub + \")\")");
+    EmitRaw(c7.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"7"}, std::move(c7));
+  }
+  {
+    auto c8 = IRBuilder::block();
+    EmitRaw(c8.get(), "std::string sub = values.back(); values.pop_back();");
+    EmitExpr(c8.get(), "values.push_back(sub)");
+    EmitRaw(c8.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"8"}, std::move(c8));
+  }
+  {
+    auto c9 = IRBuilder::block();
+    EmitRaw(c9.get(), "std::string sub = values.back(); values.pop_back();");
+    EmitExpr(c9.get(), "values.push_back(\"(\" + f.s1 + \")(\" + sub + \")\")");
+    EmitRaw(c9.get(), "stack.pop_back(); break;");
+    IRBuilder::case_(sw.get(), {"9"}, std::move(c9));
+  }
+  AddStmt(w.get(), std::move(sw));
+  AddStmt(body.get(),
+          IRBuilder::while_(IRExpr("!stack.empty()"), std::move(w)));
+  AddStmt(body.get(),
+          IRBuilder::ret(IRExpr("values.empty() ? \"\" : values.back()")));
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int StringStructuralRecursionRule::cost() const {

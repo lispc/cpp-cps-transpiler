@@ -414,10 +414,11 @@ int memo_weird(int n) {
   4. MemoizationRule         │
   5. BinaryStackRule         │
   6. GenericStackRule        │
-  7. DefunctionalizedRule ◄──┘
+  7. TreeTraversalRule       │
+  8. DefunctionalizedRule ◄──┘
      |
      v
-[代码生成] 输出迭代 C++ 代码
+[代码生成] 构建输出 IR，打印为迭代 C++ 代码
 ```
 
 ### 1. 函数体归一化 `AnalyzeBody`
@@ -541,15 +542,16 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k) + const
 
 所有规则共享一套代码生成基础设施与 AST 辅助函数：
 
-- `CodeEmitter`：轻量级缩进管理器，支持 `line`、`block`、`raw` 等操作。
+- 输出 IR（`output_ir.h/.cc`）：生成的 C++ 代码先构建为轻量 IR（`IRUnit` / `IRBlock` / `IRIf` / `IRFor` / `IRSwitch` 等节点，表达式仍为字符串），再由 `PrintGeneratedUnit` 统一打印。`IRBuilder` 提供 `if_` / `ifChain` / `for_` / `switch_` 等构造辅助；未建模的片段走 `IRRaw` 逃生舱。include 会在打印时自动提升到文件顶部并去重。
+- `StackMachineCodegen`（`stack_machine_codegen.h/.cc`）：显式栈样板（帧结构体、entry/tag 枚举、弹栈循环、marker/frame 分支、帧 unpack）的统一生成器，产出 IR 节点。
 - `PrintExpr` / `PrintExprWithReplacements`（`cps_generator.cc`）：把 Clang AST 表达式打印回 C++ 源码，后者支持把指定子表达式替换为变量名。
 - `transformation_rules_helpers` 提供的共享辅助函数：
   - `CollectHoles`：在表达式中收集所有直接递归调用，不进入递归调用自身的参数。
   - `IsInTailPosition` / `ContainsRecursiveCall` / `ExprUsesParams` / `IsPureExpr` 等：供规则与生成器统一使用的 AST 分析工具。
   - AST 谓词（`IsCallTo`、`ContainsCallTo`、`AnyArgMatches`、`ContainsDeclRefNamed` 等）：直接基于 Clang AST 判断表达式形状，替代早期脆弱的 `PrintExpr` + 字符串查找。
   - `ContainsWholeWord` / `ReplaceWholeWord`：生成代码时使用的整词标识符查找/替换工具。
-  - 代码生成 helper（`EmitExplicitStackLoop`、`EmitFrameUnpacks`、`EmitTailRecParamUpdate`、`EmitGeneratedBanner` 等）：把显式栈循环、帧 unpack、尾递归参数更新等通用模式集中在一处。
-- `BuildFunctionSignature` / `EmitFrameStruct`（`cps_generator.cc`）：生成函数签名和参数帧结构体。
+  - 代码生成 helper（`EmitTailRecParamUpdate`、`EmitStmtsToIR`、`EmitTargetedUnpacks` 等）：把尾递归参数更新、用户语句重放、帧字段 unpack 等通用模式集中在一处。
+- `BuildFunctionSignature`（`cps_generator.cc`）：生成函数签名。
 
 ---
 
@@ -579,7 +581,8 @@ cps/
     ├── cps_generator_analyze.cc      # AnalyzeBody：函数体归一化
     ├── cps_generator_mutual.cc       # 相互递归代码生成
     ├── cps_result.h                  # CpsResult / CpsError 结构化错误类型
-    ├── code_emitter.h                # 缩进管理代码生成器
+    ├── output_ir.h/.cc               # 生成代码的轻量 IR 与打印机（IRBuilder / PrintGeneratedUnit）
+    ├── stack_machine_codegen.h/.cc   # 显式栈样板统一生成器（产出 IR 节点）
     ├── transformation_rule.h         # BodyAnalysis、GenContext、规则接口
     ├── transformation_rules.h/.cc    # CreateDefaultRules() / RuleCatalog（规则注册表）
     ├── transformation_rules_helpers.h/.cc  # 规则与生成器共享的 AST 辅助函数与代码生成 helper

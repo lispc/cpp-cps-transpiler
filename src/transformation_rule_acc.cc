@@ -1,7 +1,6 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
 #include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -167,16 +166,8 @@ CpsResult AccumulatorRule::apply(const FunctionDecl *FD,
                                           accName + ", " + stepExpr + ")")));
   }
 
-  {
-    CodeEmitter tmp;
-    EmitTailRecParamUpdate(tmp, FD, dyn_cast<CallExpr>(RecCall), Ctx.ASTCtx);
-    std::istringstream iss(tmp.str());
-    std::string line;
-    while (std::getline(iss, line)) {
-      if (!line.empty())
-        IRBuilder::add(loopBody.get(), IRBuilder::rawStmt(line));
-    }
-  }
+  EmitTailRecParamUpdate(loopBody.get(), FD, dyn_cast<CallExpr>(RecCall),
+                         Ctx.ASTCtx);
 
   IRBuilder::add(body.get(),
                  IRBuilder::while_(IRExpr(loopCond), std::move(loopBody)));

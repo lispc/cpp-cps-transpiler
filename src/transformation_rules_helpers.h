@@ -4,13 +4,14 @@
 #ifndef TRANSFORMATION_RULES_HELPERS_H
 #define TRANSFORMATION_RULES_HELPERS_H
 
-#include "code_emitter.h"
 #include "transformation_rule.h"
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace cps {
+
+struct IRBlock;
 
 // Tail-position detection.
 bool IsInTailPosition(const clang::Expr *E, const clang::Stmt *S,
@@ -187,24 +188,18 @@ bool ParseLinearTerms(const clang::Expr *E, const std::string &FuncName,
 std::vector<std::string> ParamsUsedInCode(
     const std::string &Code,
     const std::vector<std::string> &ParamNames);
-void EmitTargetedUnpacks(CodeEmitter &e, const std::string &ArgName,
+void EmitTargetedUnpacks(IRBlock *blk, const std::string &ArgName,
                          const std::vector<std::string> &Params);
 
 // ============================================================
 // Shared code-generation helpers
 // ============================================================
 
-// Emit the "// === Generated <kind> code for function: <name> ===" banner.
-void EmitGeneratedBanner(CodeEmitter &e, const std::string &Kind,
-                         const std::string &FuncName);
-
-// Emit one or more #include <...> lines followed by a blank line.
-void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers);
-
 // Emit the tail-recursion parameter update pattern:
 //   auto next_p = <arg>;
 //   p = next_p;
-void EmitTailRecParamUpdate(CodeEmitter &e, const clang::FunctionDecl *FD,
+// Appends the statements to the given IR block.
+void EmitTailRecParamUpdate(IRBlock *blk, const clang::FunctionDecl *FD,
                             const clang::CallExpr *RecCall,
                             const clang::ASTContext *Ctx);
 

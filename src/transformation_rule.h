@@ -12,8 +12,6 @@
 
 namespace cps {
 
-class CodeEmitter;
-
 // ============================================================
 // Body analysis
 // ============================================================
@@ -184,9 +182,6 @@ std::string BuildFunctionSignature(const clang::FunctionDecl *FD,
 std::string ArgCtorDefun(const std::vector<std::string> &ParamValues,
                          const GenContext &Ctx);
 
-// Indent every line of a multi-line string by n spaces.
-std::string Indent(const std::string &s, int n);
-
 // Print an expression with every parameter reference rewritten as cur.<param>.
 // AST-level replacement avoids name-shadowing and member-access collisions.
 std::string ReplaceParamsWithCur(const clang::Expr *E, const GenContext &Ctx);
@@ -201,11 +196,6 @@ std::string ReplaceParamWithLiteral(const clang::Expr *E,
                                     const std::string &Literal,
                                     const clang::ASTContext *Ctx);
 
-// Emit a list of statements as code lines.
-void EmitStmts(CodeEmitter &e,
-               const std::vector<const clang::Stmt *> &Stmts,
-               const clang::ASTContext *Ctx);
-
 class IRBuilder;
 class IRBlock;
 
@@ -215,19 +205,8 @@ void EmitStmtsToIR(IRBuilder &builder, IRBlock *blk,
                    const clang::ASTContext *Ctx);
 
 // Emit parameter unpack statements (auto p = arg.p;).
-void EmitUnpacksDefun(CodeEmitter &e, const std::string &ArgName,
+void EmitUnpacksDefun(IRBlock *blk, const std::string &ArgName,
                       const GenContext &Ctx);
-
-// Emit a frame struct that stores all function parameters, with a constructor
-// that initializes them. Returns the frame type name (FuncName + "Frame").
-std::string EmitFrameStruct(CodeEmitter &e, const clang::FunctionDecl *FD,
-                            const GenContext &Ctx);
-
-// Emit a frame struct that stores function parameters plus a set of extra
-// captured local variables. Returns the frame type name (FuncName + "Frame").
-std::string EmitFrameStruct(CodeEmitter &e, const clang::FunctionDecl *FD,
-                            const GenContext &Ctx,
-                            const std::vector<const clang::VarDecl *> &ExtraFields);
 
 // ============================================================
 // Rule interface

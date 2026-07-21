@@ -1,7 +1,7 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "stack_machine_codegen.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -89,13 +89,13 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
   capturedLocals.insert(capturedLocals.end(), middleCaptured.begin(),
                         middleCaptured.end());
 
-  CodeEmitter e;
-  StackMachineCodegen smg(e, Ctx.FuncName, Ctx.RetType);
+  IRBuilder b;
+  StackMachineCodegen smg(Ctx.FuncName, Ctx.RetType);
   if (needsAlgorithm)
     smg.addInclude("algorithm");
 
-  smg.emitBanner("generic-stack", Ctx.FuncName);
-  smg.emitIncludes();
+  smg.emitBanner(b, "generic-stack", Ctx.FuncName);
+  smg.emitIncludes(b);
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
@@ -104,8 +104,8 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
   for (const VarDecl *VD : capturedLocals)
     smg.addLocal(VD);
 
-  smg.emitFrameStruct();
-  smg.emitStackEntryStruct();
+  smg.emitFrameStruct(b);
+  smg.emitStackEntryStruct(b);
 
   auto buildFrameArgs = [&](const std::vector<std::string> &paramValues,
                             const std::vector<const VarDecl *> &localValues) {
@@ -131,57 +131,80 @@ CpsResult GenericStackRule::apply(const FunctionDecl *FD,
   for (unsigned i = 0; i < FD->getNumParams(); ++i)
     paramNames.push_back(FD->getParamDecl(i)->getNameAsString());
 
-  e.block(sig, [&](CodeEmitter &b) {
-    smg.emitStackDecl();
-    smg.emitValuesDecl();
+  auto body = IRBuilder::block();
+  smg.emitStackDecl(body.get());
+  smg.emitValuesDecl(body.get());
 
-    // Leading statements are executed once with the original parameters and
-    // initialise any captured locals that are shared by all frames.
-    EmitStmts(b, BA.LeadingStmts, Ctx.ASTCtx);
+  // Leading statements are executed once with the original parameters and
+  // initialise any captured locals that are shared by all frames.
+  EmitStmtsToIR(b, body.get(), BA.LeadingStmts, Ctx.ASTCtx);
 
-    b.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-           buildFrameArgs(paramNames, leadingCaptured) + "));");
+  IRBuilder::add(body.get(),
+                 IRBuilder::expr(IRExpr(
+                     smg.stackName() + ".emplace_back(" + smg.frameName() +
+                     "(" + buildFrameArgs(paramNames, leadingCaptured) +
+                     "))")));
 
-    smg.beginLoop();
-    smg.emitMarkerBranch([&](CodeEmitter &iw) {
-      for (size_t i = 0; i < holes.size(); ++i) {
-        iw.line(Ctx.RetType + " v" + std::to_string(i) +
-                " = " + smg.valuesName() + ".back();");
-        iw.line(smg.valuesName() + ".pop_back();");
-      }
-      iw.line(smg.valuesName() + ".push_back(" + combinedExpr + ");");
-    });
-    smg.emitFrameBranch([&](CodeEmitter &iw) {
-      for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-        std::string prefix = (bi == 0) ? "if (" : "else if (";
-        const auto &bc = BA.BaseCases[bi];
-        iw.line(prefix + bc.CondStr + ")");
-        iw.inc();
-        iw.line(smg.valuesName() + ".push_back(" + bc.ValueStr + ");");
-        iw.dec();
-      }
-      iw.line("else {");
-      iw.inc();
-      EmitStmts(iw, BA.MiddleStmts, Ctx.ASTCtx);
-      iw.line(smg.stackName() + ".emplace_back(" + smg.entryName() + "(" +
-              std::to_string(holes.size()) + ", " + smg.frameName() + "(" +
-              buildFrameArgs(paramNames, capturedLocals) + ")));");
-      for (size_t i = 0; i < holes.size(); ++i) {
-        std::vector<std::string> childParams;
-        for (unsigned a = 0;
-             a < FD->getNumParams() && a < holes[i]->getNumArgs(); ++a)
-          childParams.push_back(PrintExpr(holes[i]->getArg(a), Ctx.ASTCtx));
-        iw.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-                buildFrameArgs(childParams, {}) + "));");
-      }
-      iw.dec();
-      iw.line("}");
-    });
-    smg.endLoop();
-    b.line("return " + smg.valuesName() + ".back();");
-  });
+  smg.emitLoop(
+      body.get(),
+      [&](IRBlock *iw) {
+        // Marker branch: pop the child values and push the combined result.
+        for (size_t i = 0; i < holes.size(); ++i) {
+          IRBuilder::add(iw, IRBuilder::var(Ctx.RetType,
+                                            "v" + std::to_string(i),
+                                            IRExpr(smg.valuesName() +
+                                                   ".back()")));
+          IRBuilder::add(iw,
+                         IRBuilder::expr(IRExpr(smg.valuesName() +
+                                                ".pop_back()")));
+        }
+        IRBuilder::add(iw, IRBuilder::expr(IRExpr(smg.valuesName() +
+                                                  ".push_back(" +
+                                                  combinedExpr + ")")));
+      },
+      [&](IRBlock *iw) {
+        // Frame branch: base-case chain, else push marker + child frames.
+        auto elseBlk = IRBuilder::block();
+        EmitStmtsToIR(b, elseBlk.get(), BA.MiddleStmts, Ctx.ASTCtx);
+        IRBuilder::add(elseBlk.get(),
+                       IRBuilder::expr(IRExpr(
+                           smg.stackName() + ".emplace_back(" +
+                           smg.entryName() + "(" +
+                           std::to_string(holes.size()) + ", " +
+                           smg.frameName() + "(" +
+                           buildFrameArgs(paramNames, capturedLocals) +
+                           ")))")));
+        for (size_t i = 0; i < holes.size(); ++i) {
+          std::vector<std::string> childParams;
+          for (unsigned a = 0;
+               a < FD->getNumParams() && a < holes[i]->getNumArgs(); ++a)
+            childParams.push_back(PrintExpr(holes[i]->getArg(a), Ctx.ASTCtx));
+          IRBuilder::add(elseBlk.get(),
+                         IRBuilder::expr(IRExpr(
+                             smg.stackName() + ".emplace_back(" +
+                             smg.frameName() + "(" +
+                             buildFrameArgs(childParams, {}) + "))")));
+        }
 
-  return e.str();
+        std::unique_ptr<IRStmt> chain = std::move(elseBlk);
+        for (size_t bi = BA.BaseCases.size(); bi-- > 0;) {
+          const auto &bc = BA.BaseCases[bi];
+          auto thenBlk = IRBuilder::block();
+          IRBuilder::add(thenBlk.get(),
+                         IRBuilder::expr(IRExpr(smg.valuesName() +
+                                                ".push_back(" + bc.ValueStr +
+                                                ")")));
+          chain = IRBuilder::if_(IRExpr(bc.CondStr), std::move(thenBlk),
+                                 std::move(chain));
+        }
+        IRBuilder::add(iw, std::move(chain));
+      });
+
+  IRBuilder::add(body.get(),
+                 IRBuilder::ret(IRExpr(smg.valuesName() + ".back()")));
+  b.function(sig, std::move(body));
+
+  return PrintGeneratedUnit(b.unit);
 }
 
 int GenericStackRule::cost() const { return RuleCatalog::GenericStack.Cost; }

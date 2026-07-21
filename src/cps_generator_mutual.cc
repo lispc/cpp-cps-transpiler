@@ -1,11 +1,10 @@
 #include "cps_generator.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "stack_machine_codegen.h"
 #include "transformation_rules_helpers.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -85,18 +84,17 @@ std::string RenameBaseCaseValue(const BaseCase &bc, const FunctionDecl *FD,
   return RenameParams(bc.ValueStr, FD, NewNames);
 }
 
-void EmitRenamedStmts(CodeEmitter &e,
-                      const std::vector<const clang::Stmt *> &Stmts,
-                      const clang::ASTContext *Ctx, const FunctionDecl *FD,
-                      const std::vector<std::string> &NewNames) {
-  CodeEmitter tmp;
-  EmitStmts(tmp, Stmts, Ctx);
-  std::string out = RenameParams(tmp.str(), FD, NewNames);
-  std::istringstream iss(out);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (!line.empty())
-      e.line(line);
+void EmitRenamedStmtsToIR(IRBlock *blk,
+                          const std::vector<const clang::Stmt *> &Stmts,
+                          const clang::ASTContext *Ctx, const FunctionDecl *FD,
+                          const std::vector<std::string> &NewNames) {
+  for (const Stmt *S : Stmts) {
+    std::string line = PrintStmt(S, Ctx);
+    // Clang's printPretty does not append a semicolon when printing an Expr
+    // that happens to be used as a full statement. Add it manually.
+    if (isa<Expr>(S) && !line.empty() && line.back() != ';')
+      line += ';';
+    IRBuilder::add(blk, IRBuilder::rawStmt(RenameParams(line, FD, NewNames)));
   }
 }
 
@@ -216,22 +214,19 @@ CpsResult GenerateMutualCPS(
     return GenerateMutualGenericStackCPS(FDs, Analyses, retType, paramTypes,
                                          paramNames);
 
-  CodeEmitter e;
-  e.raw("// === Generated mutual-recursion code ===\n\n");
+  IRBuilder b;
+  b.comment("=== Generated mutual-recursion code ===");
 
   // Enum tag.
   std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
-  e.raw("enum class " + enumName + " {\n");
+  std::vector<std::string> memberNames;
   for (const FunctionDecl *FD : FDs)
-    e.raw("  " + FD->getNameAsString() + ",\n");
-  e.raw("};\n\n");
+    memberNames.push_back(FD->getNameAsString());
+  b.enumDef(enumName, memberNames);
 
   // Dispatcher name: use common prefix if available, otherwise first function.
-  std::vector<std::string> names;
-  for (const FunctionDecl *FD : FDs)
-    names.push_back(FD->getNameAsString());
-  std::string prefix = CommonPrefix(names);
-  std::string dispatcherName = prefix.empty() ? names[0] : prefix;
+  std::string prefix = CommonPrefix(memberNames);
+  std::string dispatcherName = prefix.empty() ? memberNames[0] : prefix;
   dispatcherName += "_dispatch";
 
   // Dispatcher signature.
@@ -241,38 +236,45 @@ CpsResult GenerateMutualCPS(
     sig += ", " + paramTypes[i] + " " + paramNames[i];
   sig += ")";
 
-  e.block(sig, [&](CodeEmitter &b) {
-    b.block("while (1)", [&](CodeEmitter &w) {
-      w.block("switch (tag)", [&](CodeEmitter &sw) {
-        for (const FunctionDecl *FD : FDs) {
-          const BodyAnalysis &BA = Analyses[FD->getNameAsString()];
-          sw.line("case " + enumName + "::" + FD->getNameAsString() + ": {");
-          sw.inc();
-          for (const auto &bc : BA.BaseCases) {
-            sw.line("if (" + RenameBaseCaseCond(bc, FD, paramNames, Ctx) +
-                    ") return " +
-                    RenameBaseCaseValue(bc, FD, paramNames, Ctx) + ";");
-          }
-          const CallExpr *CE = dyn_cast<CallExpr>(BA.RecExpr);
-          std::string nextTag = CE->getDirectCallee()->getNameAsString();
-          sw.line("tag = " + enumName + "::" + nextTag + ";");
-          for (unsigned i = 0;
-               i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
-            sw.line("auto next_" + paramNames[i] + " = " +
-                    RenameParams(CE->getArg(i), FD, paramNames, Ctx) + ";");
-          }
-          for (unsigned i = 0;
-               i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
-            sw.line(paramNames[i] + " = next_" + paramNames[i] + ";");
-          }
-          sw.line("break;");
-          sw.dec();
-          sw.line("}");
-        }
-      });
-    });
-  });
-  e.nl();
+  auto dispatcherBody = IRBuilder::block();
+  auto loopBody = IRBuilder::block();
+  auto sw = IRBuilder::switch_(IRExpr("tag"));
+  for (const FunctionDecl *FD : FDs) {
+    const BodyAnalysis &BA = Analyses[FD->getNameAsString()];
+    auto caseBody = IRBuilder::block();
+    for (const auto &bc : BA.BaseCases) {
+      IRBuilder::add(caseBody.get(),
+                     IRBuilder::if_(
+                         IRExpr(RenameBaseCaseCond(bc, FD, paramNames, Ctx)),
+                         IRBuilder::ret(IRExpr(RenameBaseCaseValue(
+                             bc, FD, paramNames, Ctx)))));
+    }
+    const CallExpr *CE = dyn_cast<CallExpr>(BA.RecExpr);
+    std::string nextTag = CE->getDirectCallee()->getNameAsString();
+    IRBuilder::add(caseBody.get(),
+                   IRBuilder::expr(IRExpr("tag = " + enumName +
+                                          "::" + nextTag)));
+    for (unsigned i = 0;
+         i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
+      IRBuilder::add(caseBody.get(),
+                     IRBuilder::var("auto", "next_" + paramNames[i],
+                                    IRExpr(RenameParams(CE->getArg(i), FD,
+                                                        paramNames, Ctx))));
+    }
+    for (unsigned i = 0;
+         i < FD->getNumParams() && i < CE->getNumArgs(); ++i) {
+      IRBuilder::add(caseBody.get(),
+                     IRBuilder::expr(IRExpr(paramNames[i] + " = next_" +
+                                            paramNames[i])));
+    }
+    IRBuilder::add(caseBody.get(), IRBuilder::break_());
+    IRBuilder::case_(sw.get(), {enumName + "::" + FD->getNameAsString()},
+                     std::move(caseBody));
+  }
+  IRBuilder::add(loopBody.get(), std::move(sw));
+  IRBuilder::add(dispatcherBody.get(),
+                 IRBuilder::while_(IRExpr("1"), std::move(loopBody)));
+  b.function(sig, std::move(dispatcherBody));
 
   // Wrapper functions.
   for (const FunctionDecl *FD : FDs) {
@@ -282,19 +284,17 @@ CpsResult GenerateMutualCPS(
       wrapperSig += paramTypes[i] + " " + paramNames[i];
     }
     wrapperSig += ")";
-    e.block(wrapperSig, [&](CodeEmitter &b) {
-      std::string call = "return " + dispatcherName +
-                         "(" + enumName + "::" +
-                         FD->getNameAsString();
-      for (const auto &p : paramNames)
-        call += ", " + p;
-      call += ");";
-      b.line(call);
-    });
-    e.nl();
+    std::string call = dispatcherName + "(" + enumName + "::" +
+                       FD->getNameAsString();
+    for (const auto &p : paramNames)
+      call += ", " + p;
+    call += ")";
+    auto wrapperBody = IRBuilder::block();
+    IRBuilder::add(wrapperBody.get(), IRBuilder::ret(IRExpr(call)));
+    b.function(wrapperSig, std::move(wrapperBody));
   }
 
-  return e.str();
+  return PrintGeneratedUnit(b.unit);
 }
 
 CpsResult GenerateMutualGenericStackCPS(
@@ -357,25 +357,22 @@ CpsResult GenerateMutualGenericStackCPS(
   std::string dispatcherName = prefix.empty() ? names[0] : prefix;
   dispatcherName += "_dispatch";
 
+  IRBuilder b;
   // Use the dispatcher name as the base for frame/entry types so multiple
   // mutual groups in the same translation unit cannot clash.
-  CodeEmitter e;
-  StackMachineCodegen smg(e, dispatcherName, retType);
-  smg.emitBanner("mutual-recursion code (generic stack)", groupName);
-  smg.emitIncludes();
+  StackMachineCodegen smg(dispatcherName, retType);
+  smg.emitBanner(b, "mutual-recursion code (generic stack)", groupName);
+  smg.emitIncludes(b);
 
   // Function tag enum.
   std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
-  e.raw("enum class " + enumName + " {\n");
-  for (const FunctionDecl *FD : FDs)
-    e.raw("  " + FD->getNameAsString() + ",\n");
-  e.raw("};\n\n");
+  b.enumDef(enumName, names);
 
   smg.addTagField(enumName);
   for (size_t i = 0; i < paramNames.size(); ++i)
     smg.addPlainField(paramTypes[i], paramNames[i]);
-  smg.emitFrameStruct();
-  smg.emitStackEntryStruct();
+  smg.emitFrameStruct(b);
+  smg.emitStackEntryStruct(b);
 
   // Dispatcher signature.
   std::string sig = retType + " " + dispatcherName + "(" + enumName + " tag";
@@ -394,92 +391,133 @@ CpsResult GenerateMutualGenericStackCPS(
     return s;
   };
 
-  e.block(sig, [&](CodeEmitter &b) {
-    smg.emitStackDecl();
-    smg.emitValuesDecl();
-    b.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-           buildFrameArgs("tag", paramNames) + "));");
+  auto body = IRBuilder::block();
+  smg.emitStackDecl(body.get());
+  smg.emitValuesDecl(body.get());
+  IRBuilder::add(body.get(),
+                 IRBuilder::expr(IRExpr(
+                     smg.stackName() + ".emplace_back(" + smg.frameName() +
+                     "(" + buildFrameArgs("tag", paramNames) + "))")));
 
-    smg.beginLoop();
-    smg.emitMarkerBranch([&](CodeEmitter &iw) {
-      iw.line(enumName + " ftag = " + smg.curName() + ".tag;");
-      for (size_t i = 0; i < FDs.size(); ++i) {
-        const std::string &name = FDs[i]->getNameAsString();
-        iw.line((i == 0 ? "if (" : "else if (") +
-                std::string("ftag == ") + enumName + "::" + name + ") {");
-        iw.inc();
-        size_t hcount = HolesByFunc.at(name).size();
-        for (size_t j = 0; j < hcount; ++j) {
-          iw.line(retType + " v" + std::to_string(j) + " = " +
-                  smg.valuesName() + ".back();");
-          iw.line(smg.valuesName() + ".pop_back();");
+  smg.emitLoop(
+      body.get(),
+      [&](IRBlock *iw) {
+        // Marker branch: combine the child values of the finished frame.
+        IRBuilder::add(iw, IRBuilder::var(enumName, "ftag",
+                                          IRExpr(smg.curName() + ".tag")));
+        std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>>
+            branches;
+        for (const FunctionDecl *FD : FDs) {
+          const std::string &name = FD->getNameAsString();
+          auto blk = IRBuilder::block();
+          size_t hcount = HolesByFunc.at(name).size();
+          for (size_t j = 0; j < hcount; ++j) {
+            IRBuilder::add(blk.get(),
+                           IRBuilder::var(retType, "v" + std::to_string(j),
+                                          IRExpr(smg.valuesName() +
+                                                 ".back()")));
+            IRBuilder::add(blk.get(),
+                           IRBuilder::expr(IRExpr(smg.valuesName() +
+                                                  ".pop_back()")));
+          }
+          IRBuilder::add(blk.get(),
+                         IRBuilder::expr(IRExpr(smg.valuesName() +
+                                                ".push_back(" +
+                                                CombinedByFunc.at(name) +
+                                                ")")));
+          branches.emplace_back("ftag == " + enumName + "::" + name,
+                                std::move(blk));
         }
-        iw.line(smg.valuesName() + ".push_back(" + CombinedByFunc.at(name) +
-                ");");
-        iw.dec();
-        iw.line("}");
-      }
-    });
-    smg.emitFrameBranch([&](CodeEmitter &iw) {
-      iw.line(enumName + " ftag = " + smg.curName() + ".tag;");
-      for (size_t fi = 0; fi < FDs.size(); ++fi) {
-        const FunctionDecl *FD = FDs[fi];
-        const std::string &name = FD->getNameAsString();
-        const BodyAnalysis &BA = Analyses.at(name);
-        iw.line((fi == 0 ? "if (" : "else if (") +
-                std::string("ftag == ") + enumName + "::" + name + ") {");
-        iw.inc();
-        EmitRenamedStmts(iw, BA.LeadingStmts, Ctx, FD, paramNames);
-        for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-          std::string prefix = (bi == 0) ? "if (" : "else if (";
-          const auto &bc = BA.BaseCases[bi];
-          iw.line(prefix + RenameBaseCaseCond(bc, FD, paramNames, Ctx) + ")");
-          iw.inc();
-          iw.line(smg.valuesName() + ".push_back(" +
-                  RenameBaseCaseValue(bc, FD, paramNames, Ctx) + ");");
-          iw.dec();
-        }
-        iw.line("else {");
-        iw.inc();
-        EmitRenamedStmts(iw, BA.MiddleStmts, Ctx, FD, paramNames);
-        const std::vector<CallExpr *> &holes = HolesByFunc.at(name);
-        if (isTailByFunc[name]) {
-          // Tail-call member: directly push the callee frame, no marker.
-          const CallExpr *CE = holes[0];
-          std::vector<std::string> args;
-          for (unsigned a = 0;
-               a < FD->getNumParams() && a < CE->getNumArgs(); ++a)
-            args.push_back(RenameParams(CE->getArg(a), FD, paramNames, Ctx));
-          iw.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
-                  buildFrameArgs(enumName + "::" +
-                                     CE->getDirectCallee()->getNameAsString(),
-                                 args) + "));");
-        } else {
-          iw.line(smg.stackName() + ".emplace_back(" + smg.entryName() + "(" +
-                  std::to_string(holes.size()) + ", " + smg.curName() + "));");
-          for (size_t hi = 0; hi < holes.size(); ++hi) {
+        IRBuilder::add(iw, IRBuilder::ifChain(std::move(branches)));
+      },
+      [&](IRBlock *iw) {
+        // Frame branch: dispatch on the function tag.
+        IRBuilder::add(iw, IRBuilder::var(enumName, "ftag",
+                                          IRExpr(smg.curName() + ".tag")));
+        std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>>
+            branches;
+        for (const FunctionDecl *FD : FDs) {
+          const std::string &name = FD->getNameAsString();
+          const BodyAnalysis &BA = Analyses.at(name);
+          auto blk = IRBuilder::block();
+          EmitRenamedStmtsToIR(blk.get(), BA.LeadingStmts, Ctx, FD,
+                               paramNames);
+
+          // else block: middle statements + pushes.
+          auto elseBlk = IRBuilder::block();
+          EmitRenamedStmtsToIR(elseBlk.get(), BA.MiddleStmts, Ctx, FD,
+                               paramNames);
+          const std::vector<CallExpr *> &holes = HolesByFunc.at(name);
+          if (isTailByFunc[name]) {
+            // Tail-call member: directly push the callee frame, no marker.
+            const CallExpr *CE = holes[0];
             std::vector<std::string> args;
             for (unsigned a = 0;
-                 a < FD->getNumParams() && a < holes[hi]->getNumArgs(); ++a)
-              args.push_back(
-                  RenameParams(holes[hi]->getArg(a), FD, paramNames, Ctx));
-            iw.line(smg.stackName() + ".emplace_back(" + smg.frameName() + "(" +
+                 a < FD->getNumParams() && a < CE->getNumArgs(); ++a)
+              args.push_back(RenameParams(CE->getArg(a), FD, paramNames, Ctx));
+            IRBuilder::add(
+                elseBlk.get(),
+                IRBuilder::expr(IRExpr(
+                    smg.stackName() + ".emplace_back(" + smg.frameName() +
+                    "(" +
                     buildFrameArgs(enumName + "::" +
-                                       holes[hi]->getDirectCallee()
+                                       CE->getDirectCallee()
                                            ->getNameAsString(),
-                                   args) + "));");
+                                   args) +
+                    "))")));
+          } else {
+            IRBuilder::add(elseBlk.get(),
+                           IRBuilder::expr(IRExpr(
+                               smg.stackName() + ".emplace_back(" +
+                               smg.entryName() + "(" +
+                               std::to_string(holes.size()) + ", " +
+                               smg.curName() + "))")));
+            for (size_t hi = 0; hi < holes.size(); ++hi) {
+              std::vector<std::string> args;
+              for (unsigned a = 0;
+                   a < FD->getNumParams() && a < holes[hi]->getNumArgs(); ++a)
+                args.push_back(
+                    RenameParams(holes[hi]->getArg(a), FD, paramNames, Ctx));
+              IRBuilder::add(
+                  elseBlk.get(),
+                  IRBuilder::expr(IRExpr(
+                      smg.stackName() + ".emplace_back(" + smg.frameName() +
+                      "(" +
+                      buildFrameArgs(enumName + "::" +
+                                         holes[hi]
+                                             ->getDirectCallee()
+                                             ->getNameAsString(),
+                                     args) +
+                      "))")));
+            }
           }
+
+          std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>>
+              bcBranches;
+          for (const auto &bc : BA.BaseCases) {
+            auto thenBlk = IRBuilder::block();
+            IRBuilder::add(thenBlk.get(),
+                           IRBuilder::expr(IRExpr(
+                               smg.valuesName() + ".push_back(" +
+                               RenameBaseCaseValue(bc, FD, paramNames, Ctx) +
+                               ")")));
+            bcBranches.emplace_back(
+                RenameBaseCaseCond(bc, FD, paramNames, Ctx),
+                std::move(thenBlk));
+          }
+          IRBuilder::add(blk.get(),
+                         IRBuilder::ifChain(std::move(bcBranches),
+                                      std::move(elseBlk)));
+
+          branches.emplace_back("ftag == " + enumName + "::" + name,
+                                std::move(blk));
         }
-        iw.dec();
-        iw.line("}");
-        iw.dec();
-        iw.line("}");
-      }
-    });
-    smg.endLoop();
-    b.line("return " + smg.valuesName() + ".back();");
-  });
-  e.nl();
+        IRBuilder::add(iw, IRBuilder::ifChain(std::move(branches)));
+      });
+
+  IRBuilder::add(body.get(),
+                 IRBuilder::ret(IRExpr(smg.valuesName() + ".back()")));
+  b.function(sig, std::move(body));
 
   // Wrapper functions.
   for (const FunctionDecl *FD : FDs) {
@@ -489,18 +527,17 @@ CpsResult GenerateMutualGenericStackCPS(
       wrapperSig += paramTypes[i] + " " + paramNames[i];
     }
     wrapperSig += ")";
-    e.block(wrapperSig, [&](CodeEmitter &b) {
-      std::string call = "return " + dispatcherName +
-                         "(" + enumName + "::" + FD->getNameAsString();
-      for (const auto &p : paramNames)
-        call += ", " + p;
-      call += ");";
-      b.line(call);
-    });
-    e.nl();
+    std::string call = dispatcherName + "(" + enumName + "::" +
+                       FD->getNameAsString();
+    for (const auto &p : paramNames)
+      call += ", " + p;
+    call += ")";
+    auto wrapperBody = IRBuilder::block();
+    IRBuilder::add(wrapperBody.get(), IRBuilder::ret(IRExpr(call)));
+    b.function(wrapperSig, std::move(wrapperBody));
   }
 
-  return e.str();
+  return PrintGeneratedUnit(b.unit);
 }
 
 } // namespace cps

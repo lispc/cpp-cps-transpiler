@@ -1,7 +1,7 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -449,491 +449,537 @@ CpsResult TreeTraversalRule::apply(const FunctionDecl *FD,
   std::string valuesName = "__cps_values";
   std::string curName = "__cps_cur";
 
-  CodeEmitter e;
-  e.raw("// === Generated tree-traversal code for function: " + Ctx.FuncName +
-        " ===\n\n");
-  e.line("#include <vector>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated tree-traversal code for function: " + Ctx.FuncName +
+            " ===");
+  b.include("vector");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
 
-  e.block("struct " + frameName, [&](CodeEmitter &b) {
+  // Frame struct: one field per non-output parameter, plus bookkeeping fields
+  // for the post-loop phase (done) and value-combining markers.
+  {
+    IRStructData frame;
+    frame.name = frameName;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       if (IsOutRef[i])
         continue;
-      b.line(GetParamStorageType(FD->getParamDecl(i)) + " " +
-             FD->getParamDecl(i)->getNameAsString() + ";");
+      frame.fields.emplace_back(GetParamStorageType(FD->getParamDecl(i)),
+                                FD->getParamDecl(i)->getNameAsString());
     }
     bool NeedsMarker = IsBoolAllAny || IsFindFirst;
     bool NeedsDone = HasPostLoop || NeedsMarker;
     if (NeedsDone)
-      b.line("bool done;");
+      frame.fields.emplace_back("bool", "done");
     if (NeedsMarker) {
-      b.line("bool is_marker;");
-      b.line("std::size_t marker_count;");
+      frame.fields.emplace_back("bool", "is_marker");
+      frame.fields.emplace_back("std::size_t", "marker_count");
       if (IsBoolAllAny)
-        b.line("bool marker_and;");
+        frame.fields.emplace_back("bool", "marker_and");
     }
-    std::string ctor = frameName + "(";
-    std::string init;
+    std::vector<IRCtorParam> ctorParams;
+    std::vector<std::pair<std::string, std::string>> ctorInit;
     for (unsigned i = 0; i < FD->getNumParams(); ++i) {
       if (IsOutRef[i])
         continue;
       std::string p = FD->getParamDecl(i)->getNameAsString();
-      if (!init.empty()) {
-        ctor += ", ";
-        init += ", ";
-      }
-      ctor += GetParamStorageType(FD->getParamDecl(i)) + " " + p + "_";
-      init += p + "(" + p + "_)";
+      ctorParams.emplace_back(GetParamStorageType(FD->getParamDecl(i)),
+                              p + "_");
+      ctorInit.emplace_back(p, p + "_");
     }
     if (NeedsDone) {
-      if (!init.empty()) {
-        ctor += ", ";
-        init += ", ";
-      }
-      ctor += "bool done_ = false";
-      init += "done(done_)";
+      ctorParams.emplace_back("bool", "done_", "false");
+      ctorInit.emplace_back("done", "done_");
     }
     if (NeedsMarker) {
-      if (!init.empty()) {
-        ctor += ", ";
-        init += ", ";
-      }
-      ctor += "bool is_marker_ = false";
-      init += "is_marker(is_marker_)";
-      ctor += ", std::size_t marker_count_ = 0";
-      init += ", marker_count(marker_count_)";
+      ctorParams.emplace_back("bool", "is_marker_", "false");
+      ctorInit.emplace_back("is_marker", "is_marker_");
+      ctorParams.emplace_back("std::size_t", "marker_count_", "0");
+      ctorInit.emplace_back("marker_count", "marker_count_");
       if (IsBoolAllAny) {
-        ctor += ", bool marker_and_ = false";
-        init += ", marker_and(marker_and_)";
+        ctorParams.emplace_back("bool", "marker_and_", "false");
+        ctorInit.emplace_back("marker_and", "marker_and_");
       }
     }
-    ctor += ")";
-    if (!init.empty())
-      ctor += " : " + init;
-    ctor += " {}";
-    b.line(ctor);
-  }, ";");
-  e.nl();
+    frame.ctors.emplace_back(std::move(ctorParams), std::move(ctorInit));
+    b.structDef(std::move(frame));
+  }
 
-  e.block(sig, [&](CodeEmitter &b) {
-    // Emit leading statements (those before the first base case / loop).
-    for (const Stmt *S : CS->body()) {
-      if (IsLoopStmt(S) || isa<IfStmt>(S))
-        break;
-      std::string txt = PrintStmt(S, Ctx.ASTCtx);
-      if (!txt.empty())
-        b.line(txt);
-    }
+  auto body = IRBuilder::block();
 
-    // Initialize stack with the original arguments.
-    b.line("std::vector<" + frameName + "> " + stackName + ";");
-    if (IsBoolAllAny)
-      b.line("std::vector<bool> " + valuesName + ";");
-    if (IsFindFirst)
-      b.line("std::vector<" + Ctx.RetType + "> " + valuesName + ";");
-    std::string push0 = stackName + ".emplace_back(" + frameName + "(";
-    bool firstPush = true;
-    for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-      if (IsOutRef[i])
-        continue;
-      if (!firstPush)
-        push0 += ", ";
-      push0 += FD->getParamDecl(i)->getNameAsString();
-      firstPush = false;
-    }
-    push0 += "));";
-    b.line(push0);
+  // Emit leading statements (those before the first base case / loop).
+  for (const Stmt *S : CS->body()) {
+    if (IsLoopStmt(S) || isa<IfStmt>(S))
+      break;
+    std::string txt = PrintStmt(S, Ctx.ASTCtx);
+    if (!txt.empty())
+      IRBuilder::add(body.get(), IRBuilder::rawStmt(txt));
+  }
 
-    b.block("while (!" + stackName + ".empty())", [&](CodeEmitter &w) {
-      w.line("auto " + curName + " = " + stackName + ".back();");
-      w.line(stackName + ".pop_back();");
-      for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-        if (IsOutRef[i])
-          continue;
-        w.line("auto " + FD->getParamDecl(i)->getNameAsString() + " = " + curName + "." +
-               FD->getParamDecl(i)->getNameAsString() + ";");
-      }
+  // Initialize stack with the original arguments.
+  IRBuilder::add(body.get(),
+                 IRBuilder::var("std::vector<" + frameName + ">", stackName));
+  if (IsBoolAllAny)
+    IRBuilder::add(body.get(),
+                   IRBuilder::var("std::vector<bool>", valuesName));
+  if (IsFindFirst)
+    IRBuilder::add(body.get(), IRBuilder::var("std::vector<" + Ctx.RetType + ">",
+                                              valuesName));
+  std::string push0 = stackName + ".emplace_back(" + frameName + "(";
+  bool firstPush = true;
+  for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+    if (IsOutRef[i])
+      continue;
+    if (!firstPush)
+      push0 += ", ";
+    push0 += FD->getParamDecl(i)->getNameAsString();
+    firstPush = false;
+  }
+  push0 += "))";
+  IRBuilder::add(body.get(), IRBuilder::expr(IRExpr(push0)));
 
-      if (IsBoolAllAny) {
-        w.block("if (" + curName + ".is_marker)", [&](CodeEmitter &mw) {
-          mw.line("bool res = " + curName + ".marker_and ? true : false;");
-          mw.block("for (std::size_t i = 0; i < " + curName + ".marker_count; ++i)",
-                   [&](CodeEmitter &fw) {
-                     fw.line("bool v = " + valuesName + ".back(); " + valuesName + ".pop_back();");
-                     fw.line("res = " + curName + ".marker_and ? (res && v) : (res || v);");
-                   });
-          mw.line(valuesName + ".push_back(res);");
-          mw.line("continue;");
-        });
-      }
+  auto w = IRBuilder::block();
+  IRBuilder::add(w.get(), IRBuilder::var("auto", curName,
+                                         IRExpr(stackName + ".back()")));
+  IRBuilder::add(w.get(), IRBuilder::expr(IRExpr(stackName + ".pop_back()")));
+  for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+    if (IsOutRef[i])
+      continue;
+    const std::string pName = FD->getParamDecl(i)->getNameAsString();
+    IRBuilder::add(w.get(), IRBuilder::var("auto", pName,
+                                           IRExpr(curName + "." + pName)));
+  }
 
-      if (IsFindFirst) {
-        w.block("if (" + curName + ".is_marker)", [&](CodeEmitter &mw) {
-          mw.line(Ctx.RetType + " res = nullptr;");
-          mw.block("for (std::size_t i = 0; i < " + curName + ".marker_count; ++i)",
-                   [&](CodeEmitter &fw) {
-                     fw.line(Ctx.RetType + " v = " + valuesName + ".back(); " + valuesName + ".pop_back();");
-                     fw.line("if (v) res = v;");
-                   });
-          mw.line(valuesName + ".push_back(res);");
-          mw.line("continue;");
-        });
-      }
+  if (IsBoolAllAny) {
+    auto mw = IRBuilder::block();
+    IRBuilder::add(
+        mw.get(),
+        IRBuilder::var("bool", "res",
+                       IRExpr(curName + ".marker_and ? true : false")));
+    auto fw = IRBuilder::block();
+    IRBuilder::add(fw.get(),
+                   IRBuilder::var("bool", "v", IRExpr(valuesName + ".back()")));
+    IRBuilder::add(fw.get(),
+                   IRBuilder::expr(IRExpr(valuesName + ".pop_back()")));
+    IRBuilder::add(fw.get(),
+                   IRBuilder::expr(IRExpr("res = " + curName +
+                                          ".marker_and ? (res && v) : (res || v)")));
+    IRBuilder::add(mw.get(),
+                   IRBuilder::for_("std::size_t i = 0",
+                                   IRExpr("i < " + curName + ".marker_count"),
+                                   "++i", std::move(fw)));
+    IRBuilder::add(mw.get(),
+                   IRBuilder::expr(IRExpr(valuesName + ".push_back(res)")));
+    IRBuilder::add(mw.get(), IRBuilder::continue_());
+    IRBuilder::add(w.get(),
+                   IRBuilder::if_(IRExpr(curName + ".is_marker"),
+                                  std::move(mw)));
+  }
 
-      auto emitBaseCases = [&](CodeEmitter &target, bool inPostLoop) {
-        for (const Stmt *S : CS->body()) {
-          if (IsLoopStmt(S))
-            break;
-          if (S == PostLoopIf)
-            continue;
-          if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
-            for (auto *D : DS->decls()) {
-              if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
-                if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
-                  std::string txt =
-                      NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
-                  if (!txt.empty())
-                    target.raw(Indent(txt, target.current_indent() * 2) + "\n");
-                  break;
-                }
-              }
-            }
-            continue;
-          }
-          if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-            std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
-            if (!txt.empty()) {
-              txt = EnsureSemicolon(txt);
-              txt = applyPreLoopReplacements(txt);
-              // Inside the explicit stack loop, a void base case "return;"
-              // means "skip the rest of this frame", not "exit the function".
-              if (IsVoid && !inPostLoop)
-                txt = ReplaceWholeWord(txt, "return", "continue");
-              target.raw(Indent(txt, target.current_indent() * 2) + "\n");
-            }
-          }
-        }
-      };
+  if (IsFindFirst) {
+    auto mw = IRBuilder::block();
+    IRBuilder::add(mw.get(),
+                   IRBuilder::var(Ctx.RetType, "res", IRExpr("nullptr")));
+    auto fw = IRBuilder::block();
+    IRBuilder::add(fw.get(), IRBuilder::var(Ctx.RetType, "v",
+                                            IRExpr(valuesName + ".back()")));
+    IRBuilder::add(fw.get(),
+                   IRBuilder::expr(IRExpr(valuesName + ".pop_back()")));
+    IRBuilder::add(fw.get(),
+                   IRBuilder::if_(IRExpr("v"),
+                                  IRBuilder::expr(IRExpr("res = v"))));
+    IRBuilder::add(mw.get(),
+                   IRBuilder::for_("std::size_t i = 0",
+                                   IRExpr("i < " + curName + ".marker_count"),
+                                   "++i", std::move(fw)));
+    IRBuilder::add(mw.get(),
+                   IRBuilder::expr(IRExpr(valuesName + ".push_back(res)")));
+    IRBuilder::add(mw.get(), IRBuilder::continue_());
+    IRBuilder::add(w.get(),
+                   IRBuilder::if_(IRExpr(curName + ".is_marker"),
+                                  std::move(mw)));
+  }
 
-      auto emitFindFirstBaseCases = [&](CodeEmitter &target) {
-        for (const Stmt *S : CS->body()) {
-          if (IsLoopStmt(S))
-            break;
-          if (S == PostLoopIf)
-            continue;
-          if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
-            for (auto *D : DS->decls()) {
-              if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
-                if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
-                  std::string txt =
-                      NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
-                  if (!txt.empty())
-                    target.raw(Indent(txt, target.current_indent() * 2) + "\n");
-                  break;
-                }
-              }
-            }
-            continue;
-          }
-          if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
-            std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
-            if (!txt.empty()) {
-              txt = EnsureSemicolon(txt);
-              txt = applyPreLoopReplacements(txt);
-              txt = ReplaceReturnsWithValuePush(txt, valuesName);
-              target.raw(Indent(txt, target.current_indent() * 2) + "\n");
-            }
-          }
-        }
-      };
-
-      auto emitPostLoopIf = [&](CodeEmitter &target) {
-        if (!PostLoopIf || !PostLoopAction)
-          return;
-        const Stmt *InnerThen = GetInnermostThen(PostLoopIf);
-        std::string postIfSrc = GetSourceText(PostLoopIf, Ctx.ASTCtx);
-        std::string innerThenSrc = GetSourceText(InnerThen, Ctx.ASTCtx);
-        std::string actionSrc =
-            EnsureSemicolon(GetSourceText(PostLoopAction, Ctx.ASTCtx));
-        std::string replacement = "{\n" + actionSrc + "\ncontinue;\n}";
-        size_t pos = postIfSrc.find(innerThenSrc);
-        if (pos != std::string::npos) {
-          postIfSrc.replace(pos, innerThenSrc.size(), replacement);
-          target.raw(Indent(NormalizeIndentation(postIfSrc),
-                            target.current_indent() * 2) +
-                     "\n");
-        }
-      };
-
-      if (HasPostLoop) {
-        w.block("if (" + curName + ".done)", [&](CodeEmitter &dw) {
-          for (const Stmt *S : PostLoopStmts) {
-            std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
-            if (!txt.empty()) {
-              txt = EnsureSemicolon(txt);
-              dw.raw(Indent(txt, dw.current_indent() * 2) + "\n");
-            }
-          }
-        });
-        w.block("else", [&](CodeEmitter &ew) {
-          emitBaseCases(ew, false);
-
-          std::string pushStr =
-              stackName + ".emplace_back(" + frameName + "(" +
-              buildFrameCtorArgs(RecCall) + "));";
-          std::string markerStr =
-              stackName + ".emplace_back(" + frameName + "(" +
-              buildFrameCtorArgsFromParams() + ", true));";
-
-          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-          if (ForRange) {
-            std::string rangeSrc =
-                GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-            std::string loopVarSrc = StripTrailingColon(
-                GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-            ew.block("", [&](CodeEmitter &rb) {
-              rb.line("auto &&__cps_range = " + rangeSrc + ";");
-              rb.line(markerStr);
-              rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
-                       "__cps_range.rend(); ++__cps_it)",
-                       [&](CodeEmitter &fb) {
-                         fb.line(loopVarSrc + " = *__cps_it;");
-                         fb.line(pushStr);
-                       });
-            });
-          } else {
-            // Marker is pushed with current parameters, not recursive-call
-            // arguments; reuse the current parameter names.
-            std::string markerStrNonRange =
-                stackName + ".emplace_back(" + frameName + "(" +
-                buildFrameCtorArgsFromParams() + ", true));";
-            ew.line(markerStrNonRange);
-            std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-            if (RecIf) {
-              std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
-              size_t pos = loopSrc.find(recIfSrc);
-              if (pos != std::string::npos) {
-                loopSrc.replace(pos, recIfSrc.size(), pushStr);
-                size_t p2 = loopSrc.find(";;", pos);
-                if (p2 != std::string::npos)
-                  loopSrc.replace(p2, 2, ";");
-              }
-            } else {
-              // Replace the statement that directly contains the recursive call.
-              const Stmt *Encl =
-                  FindDirectChildStmtContainingCall(LoopBody, RecCall);
-              std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
-                                           : GetSourceText(RecCall, Ctx.ASTCtx);
-              if (!toReplace.empty()) {
-                size_t pos = loopSrc.find(toReplace);
-                if (pos != std::string::npos) {
-                  loopSrc.replace(pos, toReplace.size(), pushStr);
-                  size_t p2 = loopSrc.find(";;", pos);
-                  if (p2 != std::string::npos)
-                    loopSrc.replace(p2, 2, ";");
-                }
-              }
-            }
-            ew.raw(Indent(NormalizeIndentation(loopSrc), ew.current_indent() * 2) +
-                   "\n");
-          }
-        });
-      } else {
-        if (IsBoolAllAny) {
-          // Emit pre-loop base-case statements.  Literal boolean returns are
-          // converted into pushes onto the values stack so that the marker
-          // frame can combine them with AND/OR.  Referenced local declarations
-          // are emitted in original order so that base-case checks can use
-          // derived locals such as `const Expr *Clean = E->IgnoreParenImpCasts();`.
-          for (const Stmt *S : CS->body()) {
-            if (S == LoopStmt)
-              break;
-            if (S == PostLoopIf)
-              continue;
-            if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
-              for (auto *D : DS->decls()) {
-                if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
-                  if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
-                    std::string txt =
-                        NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
-                    if (!txt.empty())
-                      w.raw(Indent(txt, w.current_indent() * 2) + "\n");
-                    break;
-                  }
-                }
-              }
-              continue;
-            }
-            if (!isa<IfStmt>(S) && !isa<Expr>(S))
-              continue;
-            std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
-            if (txt.empty())
-              continue;
-            txt = EnsureSemicolon(txt);
-            txt = applyPreLoopReplacements(txt);
-            txt = ReplaceLiteralReturns(txt, valuesName);
-            w.raw(Indent(txt, w.current_indent() * 2) + "\n");
-          }
-
-          // Boolean all/any over a range-based for loop.  Push a marker frame
-          // followed by one frame per child in reverse order.
-          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-          std::string rangeSrc =
-              GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-          std::string loopVarSrc = StripTrailingColon(
-              GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-          std::string emptyValue = IsAnd ? "true" : "false";
-          std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
-                                   buildFrameCtorArgsFromParams() +
-                                   ", false, true, __cps_n, " + emptyValue +
-                                   "));";
-          std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
-                                  buildFrameCtorArgs(RecCall) + "));";
-          w.block("", [&](CodeEmitter &rb) {
-            rb.line("auto &&__cps_range = " + rangeSrc + ";");
-            rb.line("std::size_t __cps_n = 0;");
-            rb.block("for (auto __cps_it = __cps_range.begin(); __cps_it != "
-                     "__cps_range.end(); ++__cps_it)",
-                     [&](CodeEmitter &cb) { cb.line("++__cps_n;"); });
-            rb.block("if (__cps_n == 0)", [&](CodeEmitter &eb) {
-              eb.line(valuesName + ".push_back(" + emptyValue + ");");
-              eb.line("continue;");
-            });
-            rb.line(markerPush);
-            rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
-                     "__cps_range.rend(); ++__cps_it)",
-                     [&](CodeEmitter &fb) {
-                       fb.line(loopVarSrc + " = *__cps_it;");
-                       fb.line(childPush);
-                     });
-            rb.line("continue;");
-          });
-        } else if (IsFindFirst) {
-          emitFindFirstBaseCases(w);
-
-          // Find-first search over a range-based for loop.  Push a marker frame
-          // followed by one frame per child in reverse order.  The marker later
-          // picks the first non-null child result.
-          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-          std::string rangeSrc =
-              GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-          std::string loopVarSrc = StripTrailingColon(
-              GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-          std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
-                                   buildFrameCtorArgsFromParams() +
-                                   ", false, true, __cps_n));";
-          std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
-                                  buildFrameCtorArgs(RecCall) + "));";
-          w.block("", [&](CodeEmitter &rb) {
-            rb.line("auto &&__cps_range = " + rangeSrc + ";");
-            rb.line("std::size_t __cps_n = 0;");
-            rb.block("for (auto __cps_it = __cps_range.begin(); __cps_it != "
-                     "__cps_range.end(); ++__cps_it)",
-                     [&](CodeEmitter &cb) { cb.line("++__cps_n;"); });
-            rb.block("if (__cps_n == 0)", [&](CodeEmitter &eb) {
-              eb.line(valuesName + ".push_back(nullptr);");
-              eb.line("continue;");
-            });
-            rb.line(markerPush);
-            rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
-                     "__cps_range.rend(); ++__cps_it)",
-                     [&](CodeEmitter &fb) {
-                       fb.line(loopVarSrc + " = *__cps_it;");
-                       fb.line(childPush);
-                     });
-            rb.line("continue;");
-          });
-        } else {
-          emitBaseCases(w, false);
-
-          // Emit the loop. For range-based for loops we rewrite to reverse
-          // iteration so that children are processed in original DFS order on
-          // the explicit stack.
-          std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
-                                buildFrameCtorArgs(RecCall) + "));";
-          const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
-          if (ForRange) {
-            std::string rangeSrc =
-                GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
-            std::string loopVarSrc = StripTrailingColon(
-                GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
-            w.block("", [&](CodeEmitter &rb) {
-              rb.line("auto &&__cps_range = " + rangeSrc + ";");
-              rb.block("for (auto __cps_it = __cps_range.rbegin(); __cps_it != "
-                       "__cps_range.rend(); ++__cps_it)",
-                       [&](CodeEmitter &fb) {
-                         fb.line(loopVarSrc + " = *__cps_it;");
-                         fb.line(pushStr);
-                       });
-            });
-          } else {
-            std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
-            if (RecIf) {
-              std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
-              size_t pos = loopSrc.find(recIfSrc);
-              if (pos != std::string::npos) {
-                loopSrc.replace(pos, recIfSrc.size(), pushStr);
-                size_t p2 = loopSrc.find(";;", pos);
-                if (p2 != std::string::npos)
-                  loopSrc.replace(p2, 2, ";");
-              }
-            } else {
-              // Replace the statement that directly contains the recursive call.
-              const Stmt *Encl =
-                  FindDirectChildStmtContainingCall(LoopBody, RecCall);
-              std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
-                                           : GetSourceText(RecCall, Ctx.ASTCtx);
-              if (!toReplace.empty()) {
-                size_t pos = loopSrc.find(toReplace);
-                if (pos != std::string::npos) {
-                  loopSrc.replace(pos, toReplace.size(), pushStr);
-                  size_t p2 = loopSrc.find(";;", pos);
-                  if (p2 != std::string::npos)
-                    loopSrc.replace(p2, 2, ";");
-                }
-              }
-            }
-            w.raw(Indent(NormalizeIndentation(loopSrc), w.current_indent() * 2) +
-                   "\n");
-          }
-          emitPostLoopIf(w);
-        }
-      }
-    });
-
-    // Emit final return.
-    const ReturnStmt *FinalRet = nullptr;
+  auto emitBaseCases = [&](IRBlock *target, bool inPostLoop) {
     for (const Stmt *S : CS->body()) {
       if (IsLoopStmt(S))
-        continue; // reset after loop
-      if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
-        FinalRet = RS;
         break;
+      if (S == PostLoopIf)
+        continue;
+      if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+        for (auto *D : DS->decls()) {
+          if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+            if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+              std::string txt =
+                  NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+              if (!txt.empty())
+                IRBuilder::add(target, IRBuilder::rawStmt(txt));
+              break;
+            }
+          }
+        }
+        continue;
       }
-    }
-    if (IsBoolAllAny) {
-      std::string emptyValue = IsAnd ? "true" : "false";
-      b.line("return " + valuesName + ".empty() ? " + emptyValue + " : " + valuesName + ".back();");
-    } else if (IsFindFirst) {
-      std::string defaultExpr = "nullptr";
-      if (FinalRet && FinalRet->getRetValue())
-        defaultExpr = StripOuterParens(
-            PrintExpr(FinalRet->getRetValue(), Ctx.ASTCtx));
-      b.line("return " + valuesName + ".empty() ? " + defaultExpr + " : " + valuesName + ".back();");
-    } else {
-      if (FinalRet && !IsVoid) {
-        std::string txt = NormalizeIndentation(PrintStmt(FinalRet, Ctx.ASTCtx));
+      if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+        std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
         if (!txt.empty()) {
           txt = EnsureSemicolon(txt);
-          b.line(txt);
+          txt = applyPreLoopReplacements(txt);
+          // Inside the explicit stack loop, a void base case "return;"
+          // means "skip the rest of this frame", not "exit the function".
+          if (IsVoid && !inPostLoop)
+            txt = ReplaceWholeWord(txt, "return", "continue");
+          IRBuilder::add(target, IRBuilder::rawStmt(txt));
         }
       }
     }
-  });
+  };
 
-  return e.str();
+  auto emitFindFirstBaseCases = [&](IRBlock *target) {
+    for (const Stmt *S : CS->body()) {
+      if (IsLoopStmt(S))
+        break;
+      if (S == PostLoopIf)
+        continue;
+      if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+        for (auto *D : DS->decls()) {
+          if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+            if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+              std::string txt =
+                  NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+              if (!txt.empty())
+                IRBuilder::add(target, IRBuilder::rawStmt(txt));
+              break;
+            }
+          }
+        }
+        continue;
+      }
+      if (const IfStmt *IfS = dyn_cast<IfStmt>(S)) {
+        std::string txt = NormalizeIndentation(PrintStmt(IfS, Ctx.ASTCtx));
+        if (!txt.empty()) {
+          txt = EnsureSemicolon(txt);
+          txt = applyPreLoopReplacements(txt);
+          txt = ReplaceReturnsWithValuePush(txt, valuesName);
+          IRBuilder::add(target, IRBuilder::rawStmt(txt));
+        }
+      }
+    }
+  };
+
+  auto emitPostLoopIf = [&](IRBlock *target) {
+    if (!PostLoopIf || !PostLoopAction)
+      return;
+    const Stmt *InnerThen = GetInnermostThen(PostLoopIf);
+    std::string postIfSrc = GetSourceText(PostLoopIf, Ctx.ASTCtx);
+    std::string innerThenSrc = GetSourceText(InnerThen, Ctx.ASTCtx);
+    std::string actionSrc =
+        EnsureSemicolon(GetSourceText(PostLoopAction, Ctx.ASTCtx));
+    std::string replacement = "{\n" + actionSrc + "\ncontinue;\n}";
+    size_t pos = postIfSrc.find(innerThenSrc);
+    if (pos != std::string::npos) {
+      postIfSrc.replace(pos, innerThenSrc.size(), replacement);
+      IRBuilder::add(target,
+                     IRBuilder::rawStmt(NormalizeIndentation(postIfSrc)));
+    }
+  };
+
+  if (HasPostLoop) {
+    auto dw = IRBuilder::block();
+    for (const Stmt *S : PostLoopStmts) {
+      std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
+      if (!txt.empty()) {
+        txt = EnsureSemicolon(txt);
+        IRBuilder::add(dw.get(), IRBuilder::rawStmt(txt));
+      }
+    }
+    auto ew = IRBuilder::block();
+    emitBaseCases(ew.get(), false);
+
+    std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
+                          buildFrameCtorArgs(RecCall) + "));";
+    std::string markerStr = stackName + ".emplace_back(" + frameName + "(" +
+                            buildFrameCtorArgsFromParams() + ", true));";
+
+    const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+    if (ForRange) {
+      std::string rangeSrc =
+          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+      std::string loopVarSrc = StripTrailingColon(
+          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+      auto rb = IRBuilder::block();
+      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
+                                              IRExpr(rangeSrc)));
+      IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerStr));
+      auto fb = IRBuilder::block();
+      IRBuilder::add(fb.get(),
+                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
+      IRBuilder::add(fb.get(), IRBuilder::rawStmt(pushStr));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
+                                     IRExpr("__cps_it != __cps_range.rend()"),
+                                     "++__cps_it", std::move(fb)));
+      IRBuilder::add(ew.get(), std::move(rb));
+    } else {
+      // Marker is pushed with current parameters, not recursive-call
+      // arguments; reuse the current parameter names.
+      std::string markerStrNonRange =
+          stackName + ".emplace_back(" + frameName + "(" +
+          buildFrameCtorArgsFromParams() + ", true));";
+      IRBuilder::add(ew.get(), IRBuilder::rawStmt(markerStrNonRange));
+      std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
+      if (RecIf) {
+        std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
+        size_t pos = loopSrc.find(recIfSrc);
+        if (pos != std::string::npos) {
+          loopSrc.replace(pos, recIfSrc.size(), pushStr);
+          size_t p2 = loopSrc.find(";;", pos);
+          if (p2 != std::string::npos)
+            loopSrc.replace(p2, 2, ";");
+        }
+      } else {
+        // Replace the statement that directly contains the recursive call.
+        const Stmt *Encl =
+            FindDirectChildStmtContainingCall(LoopBody, RecCall);
+        std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                                     : GetSourceText(RecCall, Ctx.ASTCtx);
+        if (!toReplace.empty()) {
+          size_t pos = loopSrc.find(toReplace);
+          if (pos != std::string::npos) {
+            loopSrc.replace(pos, toReplace.size(), pushStr);
+            size_t p2 = loopSrc.find(";;", pos);
+            if (p2 != std::string::npos)
+              loopSrc.replace(p2, 2, ";");
+          }
+        }
+      }
+      IRBuilder::add(ew.get(),
+                     IRBuilder::rawStmt(NormalizeIndentation(loopSrc)));
+    }
+    IRBuilder::add(w.get(), IRBuilder::if_(IRExpr(curName + ".done"),
+                                           std::move(dw), std::move(ew)));
+  } else {
+    if (IsBoolAllAny) {
+      // Emit pre-loop base-case statements.  Literal boolean returns are
+      // converted into pushes onto the values stack so that the marker
+      // frame can combine them with AND/OR.  Referenced local declarations
+      // are emitted in original order so that base-case checks can use
+      // derived locals such as `const Expr *Clean = E->IgnoreParenImpCasts();`.
+      for (const Stmt *S : CS->body()) {
+        if (S == LoopStmt)
+          break;
+        if (S == PostLoopIf)
+          continue;
+        if (const DeclStmt *DS = dyn_cast<DeclStmt>(S)) {
+          for (auto *D : DS->decls()) {
+            if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+              if (ReferencedPreLoopDecls.count(VD->getNameAsString())) {
+                std::string txt =
+                    NormalizeIndentation(PrintStmt(DS, Ctx.ASTCtx));
+                if (!txt.empty())
+                  IRBuilder::add(w.get(), IRBuilder::rawStmt(txt));
+                break;
+              }
+            }
+          }
+          continue;
+        }
+        if (!isa<IfStmt>(S) && !isa<Expr>(S))
+          continue;
+        std::string txt = NormalizeIndentation(PrintStmt(S, Ctx.ASTCtx));
+        if (txt.empty())
+          continue;
+        txt = EnsureSemicolon(txt);
+        txt = applyPreLoopReplacements(txt);
+        txt = ReplaceLiteralReturns(txt, valuesName);
+        IRBuilder::add(w.get(), IRBuilder::rawStmt(txt));
+      }
+
+      // Boolean all/any over a range-based for loop.  Push a marker frame
+      // followed by one frame per child in reverse order.
+      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+      std::string rangeSrc =
+          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+      std::string loopVarSrc = StripTrailingColon(
+          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+      std::string emptyValue = IsAnd ? "true" : "false";
+      std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
+                               buildFrameCtorArgsFromParams() +
+                               ", false, true, __cps_n, " + emptyValue + "));";
+      std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
+                              buildFrameCtorArgs(RecCall) + "));";
+      auto rb = IRBuilder::block();
+      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
+                                              IRExpr(rangeSrc)));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::var("std::size_t", "__cps_n", IRExpr("0")));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::for_("auto __cps_it = __cps_range.begin()",
+                                     IRExpr("__cps_it != __cps_range.end()"),
+                                     "++__cps_it",
+                                     IRBuilder::expr(IRExpr("++__cps_n"))));
+      auto eb = IRBuilder::block();
+      IRBuilder::add(eb.get(),
+                     IRBuilder::expr(IRExpr(valuesName + ".push_back(" +
+                                            emptyValue + ")")));
+      IRBuilder::add(eb.get(), IRBuilder::continue_());
+      IRBuilder::add(rb.get(),
+                     IRBuilder::if_(IRExpr("__cps_n == 0"), std::move(eb)));
+      IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerPush));
+      auto fb = IRBuilder::block();
+      IRBuilder::add(fb.get(),
+                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
+      IRBuilder::add(fb.get(), IRBuilder::rawStmt(childPush));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
+                                     IRExpr("__cps_it != __cps_range.rend()"),
+                                     "++__cps_it", std::move(fb)));
+      IRBuilder::add(rb.get(), IRBuilder::continue_());
+      IRBuilder::add(w.get(), std::move(rb));
+    } else if (IsFindFirst) {
+      emitFindFirstBaseCases(w.get());
+
+      // Find-first search over a range-based for loop.  Push a marker frame
+      // followed by one frame per child in reverse order.  The marker later
+      // picks the first non-null child result.
+      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+      std::string rangeSrc =
+          GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+      std::string loopVarSrc = StripTrailingColon(
+          GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+      std::string markerPush = stackName + ".emplace_back(" + frameName + "(" +
+                               buildFrameCtorArgsFromParams() +
+                               ", false, true, __cps_n));";
+      std::string childPush = stackName + ".emplace_back(" + frameName + "(" +
+                              buildFrameCtorArgs(RecCall) + "));";
+      auto rb = IRBuilder::block();
+      IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
+                                              IRExpr(rangeSrc)));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::var("std::size_t", "__cps_n", IRExpr("0")));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::for_("auto __cps_it = __cps_range.begin()",
+                                     IRExpr("__cps_it != __cps_range.end()"),
+                                     "++__cps_it",
+                                     IRBuilder::expr(IRExpr("++__cps_n"))));
+      auto eb = IRBuilder::block();
+      IRBuilder::add(
+          eb.get(),
+          IRBuilder::expr(IRExpr(valuesName + ".push_back(nullptr)")));
+      IRBuilder::add(eb.get(), IRBuilder::continue_());
+      IRBuilder::add(rb.get(),
+                     IRBuilder::if_(IRExpr("__cps_n == 0"), std::move(eb)));
+      IRBuilder::add(rb.get(), IRBuilder::rawStmt(markerPush));
+      auto fb = IRBuilder::block();
+      IRBuilder::add(fb.get(),
+                     IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
+      IRBuilder::add(fb.get(), IRBuilder::rawStmt(childPush));
+      IRBuilder::add(rb.get(),
+                     IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
+                                     IRExpr("__cps_it != __cps_range.rend()"),
+                                     "++__cps_it", std::move(fb)));
+      IRBuilder::add(rb.get(), IRBuilder::continue_());
+      IRBuilder::add(w.get(), std::move(rb));
+    } else {
+      emitBaseCases(w.get(), false);
+
+      // Emit the loop. For range-based for loops we rewrite to reverse
+      // iteration so that children are processed in original DFS order on
+      // the explicit stack.
+      std::string pushStr = stackName + ".emplace_back(" + frameName + "(" +
+                            buildFrameCtorArgs(RecCall) + "));";
+      const CXXForRangeStmt *ForRange = dyn_cast<CXXForRangeStmt>(LoopStmt);
+      if (ForRange) {
+        std::string rangeSrc =
+            GetSourceText(ForRange->getRangeInit(), Ctx.ASTCtx);
+        std::string loopVarSrc = StripTrailingColon(
+            GetSourceText(ForRange->getLoopVariable(), Ctx.ASTCtx));
+        auto rb = IRBuilder::block();
+        IRBuilder::add(rb.get(), IRBuilder::var("auto &&", "__cps_range",
+                                                IRExpr(rangeSrc)));
+        auto fb = IRBuilder::block();
+        IRBuilder::add(fb.get(),
+                       IRBuilder::rawStmt(loopVarSrc + " = *__cps_it;"));
+        IRBuilder::add(fb.get(), IRBuilder::rawStmt(pushStr));
+        IRBuilder::add(rb.get(),
+                       IRBuilder::for_("auto __cps_it = __cps_range.rbegin()",
+                                       IRExpr("__cps_it != __cps_range.rend()"),
+                                       "++__cps_it", std::move(fb)));
+        IRBuilder::add(w.get(), std::move(rb));
+      } else {
+        std::string loopSrc = GetSourceText(LoopStmt, Ctx.ASTCtx);
+        if (RecIf) {
+          std::string recIfSrc = GetSourceText(RecIf, Ctx.ASTCtx);
+          size_t pos = loopSrc.find(recIfSrc);
+          if (pos != std::string::npos) {
+            loopSrc.replace(pos, recIfSrc.size(), pushStr);
+            size_t p2 = loopSrc.find(";;", pos);
+            if (p2 != std::string::npos)
+              loopSrc.replace(p2, 2, ";");
+          }
+        } else {
+          // Replace the statement that directly contains the recursive call.
+          const Stmt *Encl =
+              FindDirectChildStmtContainingCall(LoopBody, RecCall);
+          std::string toReplace = Encl ? GetSourceText(Encl, Ctx.ASTCtx)
+                                       : GetSourceText(RecCall, Ctx.ASTCtx);
+          if (!toReplace.empty()) {
+            size_t pos = loopSrc.find(toReplace);
+            if (pos != std::string::npos) {
+              loopSrc.replace(pos, toReplace.size(), pushStr);
+              size_t p2 = loopSrc.find(";;", pos);
+              if (p2 != std::string::npos)
+                loopSrc.replace(p2, 2, ";");
+            }
+          }
+        }
+        IRBuilder::add(w.get(),
+                       IRBuilder::rawStmt(NormalizeIndentation(loopSrc)));
+      }
+      emitPostLoopIf(w.get());
+    }
+  }
+  IRBuilder::add(body.get(),
+                 IRBuilder::while_(IRExpr("!" + stackName + ".empty()"),
+                                   std::move(w)));
+
+  // Emit final return.
+  const ReturnStmt *FinalRet = nullptr;
+  for (const Stmt *S : CS->body()) {
+    if (IsLoopStmt(S))
+      continue; // reset after loop
+    if (const ReturnStmt *RS = dyn_cast<ReturnStmt>(S)) {
+      FinalRet = RS;
+      break;
+    }
+  }
+  if (IsBoolAllAny) {
+    std::string emptyValue = IsAnd ? "true" : "false";
+    IRBuilder::add(body.get(),
+                   IRBuilder::ret(IRExpr(valuesName + ".empty() ? " +
+                                         emptyValue + " : " + valuesName +
+                                         ".back()")));
+  } else if (IsFindFirst) {
+    std::string defaultExpr = "nullptr";
+    if (FinalRet && FinalRet->getRetValue())
+      defaultExpr =
+          StripOuterParens(PrintExpr(FinalRet->getRetValue(), Ctx.ASTCtx));
+    IRBuilder::add(body.get(),
+                   IRBuilder::ret(IRExpr(valuesName + ".empty() ? " +
+                                         defaultExpr + " : " + valuesName +
+                                         ".back()")));
+  } else {
+    if (FinalRet && !IsVoid) {
+      std::string txt = NormalizeIndentation(PrintStmt(FinalRet, Ctx.ASTCtx));
+      if (!txt.empty()) {
+        txt = EnsureSemicolon(txt);
+        IRBuilder::add(body.get(), IRBuilder::rawStmt(txt));
+      }
+    }
+  }
+
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int TreeTraversalRule::cost() const { return RuleCatalog::TreeTraversal.Cost; }

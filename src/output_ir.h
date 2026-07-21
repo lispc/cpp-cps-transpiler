@@ -43,6 +43,85 @@ struct IRWhile : IRStmt {
   std::unique_ptr<IRStmt> body; // normally a IRBlock
 };
 
+// C++ for loop. `init` covers both classic ("int i = 0") and range-for
+// ("auto child : node->children") forms; cond/incr are empty for range-for.
+struct IRFor : IRStmt {
+  std::string init;
+  IRExpr cond;
+  std::string incr;
+  std::unique_ptr<IRStmt> body; // normally a IRBlock
+};
+
+struct IRBreak : IRStmt {};
+struct IRContinue : IRStmt {};
+
+// A "name:" jump label (printed outdented one level, C++ style).
+struct IRLabel : IRStmt {
+  std::string name;
+  explicit IRLabel(std::string n) : name(std::move(n)) {}
+};
+
+// A "goto name;" statement.
+struct IRGoto : IRStmt {
+  std::string label;
+  explicit IRGoto(std::string l) : label(std::move(l)) {}
+};
+
+// A "// ..." comment line (multi-line text becomes multiple comment lines).
+struct IRComment : IRStmt {
+  std::string text;
+  explicit IRComment(std::string t) : text(std::move(t)) {}
+};
+
+struct IRCase {
+  std::vector<std::string> labels; // empty means `default:`
+  std::unique_ptr<IRBlock> body;
+};
+
+struct IRSwitch : IRStmt {
+  IRExpr cond;
+  std::vector<IRCase> cases;
+};
+
+struct IRStructField {
+  std::string type;
+  std::string name;
+  IRStructField(std::string t, std::string n) : type(std::move(t)), name(std::move(n)) {}
+};
+
+struct IRCtorParam {
+  std::string type;
+  std::string name;
+  std::string defaultValue; // empty means no default
+  IRCtorParam(std::string t, std::string n, std::string d = "")
+      : type(std::move(t)), name(std::move(n)), defaultValue(std::move(d)) {}
+};
+
+struct IRStructCtor {
+  std::vector<IRCtorParam> params;
+  std::vector<std::pair<std::string, std::string>> init; // (field, arg)
+  IRStructCtor(std::vector<IRCtorParam> p,
+               std::vector<std::pair<std::string, std::string>> i)
+      : params(std::move(p)), init(std::move(i)) {}
+};
+
+// Payload shared by top-level and function-local struct definitions.
+struct IRStructData {
+  std::string name;
+  std::vector<IRStructField> fields;
+  std::vector<IRStructCtor> ctors;
+  IRStructData() = default;
+  IRStructData(std::string n, std::vector<IRStructField> f,
+               std::vector<IRStructCtor> c)
+      : name(std::move(n)), fields(std::move(f)), ctors(std::move(c)) {}
+};
+
+// A struct definition inside a function body (e.g. a local Frame struct).
+struct IRLocalStruct : IRStmt {
+  IRStructData data;
+  explicit IRLocalStruct(IRStructData d) : data(std::move(d)) {}
+};
+
 struct IRReturn : IRStmt {
   std::optional<IRExpr> value;
   IRReturn() = default;
@@ -82,26 +161,12 @@ struct IRInclude : IRTopLevel {
   explicit IRInclude(std::string h) : header(std::move(h)) {}
 };
 
-struct IRStructField {
-  std::string type;
-  std::string name;
-  IRStructField(std::string t, std::string n) : type(std::move(t)), name(std::move(n)) {}
-};
-
-struct IRStructCtor {
-  std::vector<std::pair<std::string, std::string>> params; // (type, name)
-  std::vector<std::pair<std::string, std::string>> init;   // (field, arg)
-  IRStructCtor(std::vector<std::pair<std::string, std::string>> p,
-             std::vector<std::pair<std::string, std::string>> i)
-      : params(std::move(p)), init(std::move(i)) {}
-};
-
 struct IRStructDef : IRTopLevel {
-  std::string name;
-  std::vector<IRStructField> fields;
-  std::vector<IRStructCtor> ctors;
-  IRStructDef(std::string n, std::vector<IRStructField> f, std::vector<IRStructCtor> c)
-      : name(std::move(n)), fields(std::move(f)), ctors(std::move(c)) {}
+  IRStructData data;
+  IRStructDef(std::string n, std::vector<IRStructField> f,
+              std::vector<IRStructCtor> c)
+      : data(std::move(n), std::move(f), std::move(c)) {}
+  explicit IRStructDef(IRStructData d) : data(std::move(d)) {}
 };
 
 struct IREnumDef : IRTopLevel {
@@ -138,8 +203,14 @@ public:
   IRBuilder &include(const std::string &header);
   IRBuilder &blank();
 
+  // Top-level "// ..." comment (multi-line text becomes multiple lines).
+  IRBuilder &comment(const std::string &text);
+
   IRBuilder &function(const std::string &signature,
                       std::unique_ptr<IRBlock> body);
+  IRBuilder &structDef(IRStructData data);
+  IRBuilder &enumDef(const std::string &name,
+                     std::vector<std::string> enumerators);
 
   // Convenience: create and return a new IRBlock.
   static std::unique_ptr<IRBlock> block();
@@ -151,8 +222,32 @@ public:
   if_(IRExpr cond, std::unique_ptr<IRStmt> thenBranch,
       std::unique_ptr<IRStmt> elseBranch = nullptr);
 
+  // Fold a list of (cond, then-block) pairs plus an optional final else
+  // statement into an if / else-if / else chain.
+  static std::unique_ptr<IRStmt>
+  ifChain(std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>>
+              branches,
+          std::unique_ptr<IRStmt> elseBranch = nullptr);
+
   static std::unique_ptr<IRWhile>
   while_(IRExpr cond, std::unique_ptr<IRBlock> body);
+
+  static std::unique_ptr<IRFor>
+  for_(std::string init, IRExpr cond, std::string incr,
+       std::unique_ptr<IRStmt> body);
+
+  static std::unique_ptr<IRSwitch> switch_(IRExpr cond);
+  // Append a case (labels empty = default) with the given body to a switch.
+  static IRSwitch &case_(IRSwitch *sw, std::vector<std::string> labels,
+                         std::unique_ptr<IRBlock> body);
+
+  static std::unique_ptr<IRBreak> break_();
+  static std::unique_ptr<IRContinue> continue_();
+  static std::unique_ptr<IRLabel> label(std::string name);
+  static std::unique_ptr<IRGoto> goto_(std::string label);
+
+  static std::unique_ptr<IRComment> commentStmt(std::string text);
+  static std::unique_ptr<IRLocalStruct> localStruct(IRStructData data);
 
   static std::unique_ptr<IRReturn> ret();
   static std::unique_ptr<IRReturn> ret(IRExpr value);

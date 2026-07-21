@@ -1,11 +1,10 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
-#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -85,60 +84,78 @@ CpsResult TuplingRule::apply(const FunctionDecl *FD, const BodyAnalysis &BA,
   std::string nextExpr =
       StripOuterParens(PrintExprWithReplacements(BA.RecExpr, repls, Ctx.ASTCtx));
 
-  CodeEmitter e;
-  e.raw("// === Generated tupling code for function: " + Ctx.FuncName +
-        " ===\n\n");
-  e.line("#include <array>");
-  e.nl();
+  IRBuilder b;
+  b.comment("=== Generated tupling code for function: " + Ctx.FuncName +
+            " ===");
+  b.include("array");
 
   std::string sig = BuildFunctionSignature(FD, Ctx.RetType);
   const ParmVarDecl *Param = FD->getParamDecl(0);
 
-  e.block(sig, [&](CodeEmitter &b) {
-    // Early base-case return.
-    b.block("if (" + pName + " <= " + std::to_string(k - 1) + ")",
-            [&](CodeEmitter &iw) {
-              for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-                std::string prefix = (bi == 0) ? "if (" : "else if (";
-                const auto &bc = BA.BaseCases[bi];
-                std::string condStr =
-                    bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
-                std::string valStr =
-                    bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
-                iw.line(prefix + condStr + ") return " + valStr + ";");
-              }
-              iw.line("return 0;");
-            });
+  auto body = IRBuilder::block();
 
-    b.line("std::array<" + Ctx.RetType + ", " + std::to_string(k) + "> vals;");
+  // Early base-case return.
+  {
+    auto earlyBlk = IRBuilder::block();
+    std::vector<std::pair<std::string, std::unique_ptr<IRBlock>>> branches;
+    for (const auto &bc : BA.BaseCases) {
+      std::string condStr =
+          bc.CondExpr ? PrintExpr(bc.CondExpr, Ctx.ASTCtx) : bc.CondStr;
+      std::string valStr =
+          bc.ValueExpr ? PrintExpr(bc.ValueExpr, Ctx.ASTCtx) : bc.ValueStr;
+      auto thenBlk = IRBuilder::block();
+      IRBuilder::add(thenBlk.get(), IRBuilder::ret(IRExpr(valStr)));
+      branches.emplace_back(std::move(condStr), std::move(thenBlk));
+    }
+    IRBuilder::add(earlyBlk.get(),
+                   IRBuilder::ifChain(std::move(branches)));
+    IRBuilder::add(earlyBlk.get(), IRBuilder::ret(IRExpr("0")));
+    IRBuilder::add(body.get(),
+                   IRBuilder::if_(IRExpr(pName + " <= " +
+                                         std::to_string(k - 1)),
+                                  std::move(earlyBlk)));
+  }
 
-    for (int j = 0; j < k; ++j) {
-      for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
-        if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, j) ==
-            EvalResult::True) {
-          const ParmVarDecl *Param = FD->getParamDecl(0);
-          std::string baseExpr = ReplaceParamWithLiteral(
-              BA.BaseCases[bi].ValueExpr, Param, std::to_string(j),
-              Ctx.ASTCtx);
-          b.line("vals[" + std::to_string(j) + "] = " + baseExpr + ";");
-          break;
-        }
+  IRBuilder::add(body.get(),
+                 IRBuilder::var("std::array<" + Ctx.RetType + ", " +
+                                    std::to_string(k) + ">",
+                                "vals"));
+
+  for (int j = 0; j < k; ++j) {
+    for (size_t bi = 0; bi < BA.BaseCases.size(); ++bi) {
+      if (EvalConditionForParam(BA.BaseCases[bi].CondExpr, pName, j) ==
+          EvalResult::True) {
+        std::string baseExpr = ReplaceParamWithLiteral(
+            BA.BaseCases[bi].ValueExpr, Param, std::to_string(j), Ctx.ASTCtx);
+        IRBuilder::add(body.get(),
+                       IRBuilder::expr(IRExpr("vals[" + std::to_string(j) +
+                                              "] = " + baseExpr)));
+        break;
       }
     }
+  }
 
-    b.block("for (" + pType + " i = " + std::to_string(k) + "; i <= " +
-                pName + "; ++i)",
-            [&](CodeEmitter &fw) {
-              fw.line(Ctx.RetType + " next = " + nextExpr + ";");
-              for (int j = 0; j < k - 1; ++j)
-                fw.line("vals[" + std::to_string(j) + "] = vals[" +
-                        std::to_string(j + 1) + "];");
-              fw.line("vals[" + std::to_string(k - 1) + "] = next;");
-            });
-    b.line("return vals[" + std::to_string(k - 1) + "];");
-  });
+  auto forBody = IRBuilder::block();
+  IRBuilder::add(forBody.get(),
+                 IRBuilder::var(Ctx.RetType, "next", IRExpr(nextExpr)));
+  for (int j = 0; j < k - 1; ++j)
+    IRBuilder::add(forBody.get(),
+                   IRBuilder::expr(IRExpr("vals[" + std::to_string(j) +
+                                          "] = vals[" + std::to_string(j + 1) +
+                                          "]")));
+  IRBuilder::add(forBody.get(),
+                 IRBuilder::expr(IRExpr("vals[" + std::to_string(k - 1) +
+                                        "] = next")));
+  IRBuilder::add(body.get(),
+                 IRBuilder::for_(pType + " i = " + std::to_string(k),
+                                 IRExpr("i <= " + pName), "++i",
+                                 std::move(forBody)));
+  IRBuilder::add(body.get(),
+                 IRBuilder::ret(IRExpr("vals[" + std::to_string(k - 1) +
+                                       "]")));
 
-  return e.str();
+  b.function(sig, std::move(body));
+  return PrintGeneratedUnit(b.unit);
 }
 
 int TuplingRule::cost() const { return RuleCatalog::Tupling.Cost; }

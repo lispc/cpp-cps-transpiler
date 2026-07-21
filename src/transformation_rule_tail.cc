@@ -1,7 +1,6 @@
 #include "transformation_rules.h"
 #include "transformation_rule.h"
 #include "transformation_rules_helpers.h"
-#include "code_emitter.h"
 #include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
@@ -62,20 +61,8 @@ CpsResult TailRecursionRule::apply(const FunctionDecl *FD,
   }
   EmitStmtsToIR(b, loopBody.get(), BA.MiddleStmts, Ctx.ASTCtx);
 
-  // EmitTailRecParamUpdate prints "auto next_p = ...;" and "p = next_p;".
-  // We reuse it by printing to a temporary CodeEmitter and turning each line
-  // into a raw IR statement.
-  {
-    CodeEmitter tmp;
-    EmitTailRecParamUpdate(tmp, FD, dyn_cast<CallExpr>(BA.RecExpr),
-                           Ctx.ASTCtx);
-    std::istringstream iss(tmp.str());
-    std::string line;
-    while (std::getline(iss, line)) {
-      if (!line.empty())
-        IRBuilder::add(loopBody.get(), IRBuilder::rawStmt(line));
-    }
-  }
+  EmitTailRecParamUpdate(loopBody.get(), FD, dyn_cast<CallExpr>(BA.RecExpr),
+                         Ctx.ASTCtx);
 
   IRBuilder::add(body.get(),
                  IRBuilder::while_(IRExpr("1"), std::move(loopBody)));

@@ -9,11 +9,10 @@ namespace cps {
 
 using namespace clang;
 
-StackMachineCodegen::StackMachineCodegen(CodeEmitter &Emitter,
-                                         std::string BaseName,
+StackMachineCodegen::StackMachineCodegen(std::string BaseName,
                                          std::string RetType)
-    : Emitter_(Emitter), BaseName_(std::move(BaseName)),
-      RetType_(std::move(RetType)), Includes_({"vector"}) {}
+    : BaseName_(std::move(BaseName)), RetType_(std::move(RetType)),
+      Includes_({"vector"}) {}
 
 void StackMachineCodegen::addInclude(const std::string &Header) {
   Includes_.push_back(Header);
@@ -47,85 +46,85 @@ std::string StackMachineCodegen::entryName() const {
   return prefix() + BaseName_ + "Entry";
 }
 
-void StackMachineCodegen::emitBanner(const std::string &Kind,
+std::string StackMachineCodegen::entryTagName() const {
+  return prefix() + BaseName_ + "EntryTag";
+}
+
+void StackMachineCodegen::emitBanner(IRBuilder &b, const std::string &Kind,
                                      const std::string &FuncName) {
-  Emitter_.raw("// === Generated " + Kind + " code for function: " + FuncName +
-               " ===\n\n");
+  b.comment("=== Generated " + Kind + " code for function: " + FuncName +
+            " ===");
 }
 
-void StackMachineCodegen::emitIncludes() {
+void StackMachineCodegen::emitIncludes(IRBuilder &b) {
   for (const auto &h : Includes_)
-    Emitter_.line("#include <" + h + ">");
-  if (!Includes_.empty())
-    Emitter_.nl();
+    b.include(h);
 }
 
-void StackMachineCodegen::emitFrameStruct() {
-  Emitter_.block("struct " + frameName(), [&](CodeEmitter &b) {
-    for (const auto &f : Fields_)
-      b.line(f.Type + " " + f.Name + ";");
-
-    std::string ctor = frameName() + "(";
-    std::string init;
-    for (const auto &f : Fields_) {
-      if (!init.empty()) {
-        ctor += ", ";
-      }
-      ctor += f.Type + " " + f.Name + "_";
-      if (!f.Default.empty())
-        ctor += " = " + f.Default;
-      if (!init.empty())
-        init += ", ";
-      init += f.Name + "(" + f.Name + "_)";
-    }
-    ctor += ")";
-    if (!init.empty())
-      ctor += " : " + init;
-    ctor += " {}";
-    if (!Fields_.empty())
-      b.line(ctor);
-  }, ";");
-  Emitter_.nl();
+void StackMachineCodegen::emitFrameStruct(IRBuilder &b) {
+  IRStructData data;
+  data.name = frameName();
+  std::vector<IRCtorParam> params;
+  std::vector<std::pair<std::string, std::string>> init;
+  for (const auto &f : Fields_) {
+    data.fields.emplace_back(f.Type, f.Name);
+    params.emplace_back(f.Type, f.Name + "_", f.Default);
+    init.emplace_back(f.Name, f.Name + "_");
+  }
+  if (!Fields_.empty())
+    data.ctors.emplace_back(std::move(params), std::move(init));
+  b.structDef(std::move(data));
 }
 
-void StackMachineCodegen::emitStackEntryStruct() {
-  Emitter_.block("struct " + entryName(), [&](CodeEmitter &b) {
-    b.line("enum class Tag { Frame, Marker } tag;");
-    b.line(frameName() + " frame;");
-    b.line("int count;");
-    b.line(entryName() + "(" + frameName() + " f) : tag(Tag::Frame), " +
-           "frame(std::move(f)), count(0) {}");
-    b.line(entryName() + "(int c, " + frameName() +
-           " f) : tag(Tag::Marker), frame(std::move(f)), count(c) {}");
-  }, ";");
-  Emitter_.nl();
+void StackMachineCodegen::emitStackEntryStruct(IRBuilder &b) {
+  b.enumDef(entryTagName(), {"Frame", "Marker"});
+
+  IRStructData data;
+  data.name = entryName();
+  data.fields.emplace_back(entryTagName(), "tag");
+  data.fields.emplace_back(frameName(), "frame");
+  data.fields.emplace_back("int", "count");
+
+  {
+    std::vector<IRCtorParam> params;
+    params.emplace_back(frameName(), "f");
+    std::vector<std::pair<std::string, std::string>> init = {
+        {"tag", entryTagName() + "::Frame"},
+        {"frame", "std::move(f)"},
+        {"count", "0"},
+    };
+    data.ctors.emplace_back(std::move(params), std::move(init));
+  }
+  {
+    std::vector<IRCtorParam> params;
+    params.emplace_back("int", "c");
+    params.emplace_back(frameName(), "f");
+    std::vector<std::pair<std::string, std::string>> init = {
+        {"tag", entryTagName() + "::Marker"},
+        {"frame", "std::move(f)"},
+        {"count", "c"},
+    };
+    data.ctors.emplace_back(std::move(params), std::move(init));
+  }
+  b.structDef(std::move(data));
 }
 
-void StackMachineCodegen::emitStackDecl() {
-  Emitter_.line("std::vector<" + entryName() + "> " + stackName() + ";");
+void StackMachineCodegen::emitStackDecl(IRBlock *body) {
+  IRBuilder::add(body, IRBuilder::var("std::vector<" + entryName() + ">",
+                                      stackName()));
 }
 
-void StackMachineCodegen::emitValuesDecl() {
-  Emitter_.line("std::vector<" + RetType_ + "> " + valuesName() + ";");
+void StackMachineCodegen::emitValuesDecl(IRBlock *body) {
+  IRBuilder::add(body, IRBuilder::var("std::vector<" + RetType_ + ">",
+                                      valuesName()));
 }
 
-void StackMachineCodegen::beginLoop() {
-  Emitter_.line("while (!" + stackName() + ".empty()) {");
-  Emitter_.inc();
-  Emitter_.line("auto " + entryVarName() + " = " + stackName() + ".back();");
-  Emitter_.line(stackName() + ".pop_back();");
-}
-
-void StackMachineCodegen::endLoop() {
-  Emitter_.dec();
-  Emitter_.line("}");
-}
-
-void StackMachineCodegen::emitUnpackCurrent(CodeEmitter &w) const {
+void StackMachineCodegen::emitUnpackCurrent(IRBlock *blk) const {
   for (const auto &f : Fields_) {
     if (f.NoUnpack)
       continue;
-    w.line("auto " + f.Name + " = " + curName() + "." + f.Name + ";");
+    IRBuilder::add(blk, IRBuilder::var("auto", f.Name,
+                                       IRExpr(curName() + "." + f.Name)));
   }
 }
 

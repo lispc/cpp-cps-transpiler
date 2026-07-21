@@ -1,6 +1,6 @@
 #include "transformation_rules_helpers.h"
 #include "transformation_rule.h"
-#include "code_emitter.h"
+#include "output_ir.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/OperationKinds.h"
@@ -1066,10 +1066,11 @@ std::vector<std::string> ParamsUsedInCode(
   return used;
 }
 
-void EmitTargetedUnpacks(CodeEmitter &e, const std::string &ArgName,
+void EmitTargetedUnpacks(IRBlock *blk, const std::string &ArgName,
                          const std::vector<std::string> &Params) {
   for (const auto &p : Params)
-    e.line("auto " + p + " = " + ArgName + "." + p + ";");
+    IRBuilder::add(blk, IRBuilder::var("auto", p,
+                                       IRExpr(ArgName + "." + p)));
 }
 
 // ============================================================
@@ -1234,20 +1235,7 @@ bool AnyArgMatches(const CallExpr *CE,
 // Shared code-generation helpers
 // ============================================================
 
-void EmitGeneratedBanner(CodeEmitter &e, const std::string &Kind,
-                         const std::string &FuncName) {
-  e.raw("// === Generated " + Kind + " code for function: " + FuncName +
-        " ===\n\n");
-}
-
-void EmitIncludes(CodeEmitter &e, const std::vector<std::string> &Headers) {
-  for (const auto &h : Headers)
-    e.line("#include <" + h + ">");
-  if (!Headers.empty())
-    e.nl();
-}
-
-void EmitTailRecParamUpdate(CodeEmitter &e, const FunctionDecl *FD,
+void EmitTailRecParamUpdate(IRBlock *blk, const FunctionDecl *FD,
                             const CallExpr *RecCall,
                             const ASTContext *Ctx) {
   if (!RecCall)
@@ -1255,13 +1243,14 @@ void EmitTailRecParamUpdate(CodeEmitter &e, const FunctionDecl *FD,
   for (unsigned i = 0;
        i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
     std::string pName = FD->getParamDecl(i)->getNameAsString();
-    e.line("auto next_" + pName + " = " +
-           PrintExpr(RecCall->getArg(i), Ctx) + ";");
+    IRBuilder::add(blk, IRBuilder::var("auto", "next_" + pName,
+                                       IRExpr(PrintExpr(RecCall->getArg(i),
+                                                        Ctx))));
   }
   for (unsigned i = 0;
        i < FD->getNumParams() && i < RecCall->getNumArgs(); ++i) {
     std::string pName = FD->getParamDecl(i)->getNameAsString();
-    e.line(pName + " = next_" + pName + ";");
+    IRBuilder::add(blk, IRBuilder::expr(IRExpr(pName + " = next_" + pName)));
   }
 }
 
