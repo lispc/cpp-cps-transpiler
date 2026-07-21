@@ -9,6 +9,14 @@ ptr
 ref_cps
 ref_tro
 weird
+memo2d_grid
+memo2d_lcs
+memo2d_editdist
+unfold_vec
+unfold_str
+treefold_sum
+treefold_height
+treefold_para
 if_else
 multi_base
 with_local

@@ -47,6 +47,34 @@ public:
   const char *name() const override;
 };
 
+// Multi-dimensional memoization: recurrences over two or more integer index
+// parameters with constant-offset recursive calls (grid paths, LCS, edit
+// distance). Non-index parameters may be passed through unchanged.
+class MultiDimMemoRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+// Unfold (construction-side) recursion: the recursive call sits in a middle
+// statement's initializer and the result is built up layer by layer, e.g.
+//   auto r = f(n - 1); r.push_back(n); return r;
+// Converted to a two-phase loop: walk parameters down to the seed, then
+// replay the post-processing statements on the way back up.
+class UnfoldRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
 class BinaryStackRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
@@ -81,6 +109,21 @@ public:
 // loop and recurse on each child (e.g., AST search helpers like
 // ContainsRecursiveCall or ExprUsesParams).
 class TreeTraversalRule : public TransformationRule {
+public:
+  bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+               const GenContext &Ctx) const override;
+  CpsResult apply(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
+                    GenContext &Ctx) const override;
+  int cost() const override;
+  const char *name() const override;
+};
+
+// Tree fold (catamorphism/paramorphism): value-returning recursion over a
+// node pointer where every recursive call targets a ->member chain of the
+// node (e.g. t->left / t->right). The combine expression may also reference
+// the child nodes themselves (paramorphism). Generates a post-order
+// two-stack traversal without marker machinery.
+class TreeFoldRule : public TransformationRule {
 public:
   bool applies(const clang::FunctionDecl *FD, const BodyAnalysis &BA,
                const GenContext &Ctx) const override;
@@ -200,8 +243,11 @@ extern const RuleInfo TailRecursion;
 extern const RuleInfo Accumulator;
 extern const RuleInfo Tupling;
 extern const RuleInfo Memoization;
+extern const RuleInfo MultiDimMemo;
+extern const RuleInfo Unfold;
 extern const RuleInfo BinaryStack;
 extern const RuleInfo TreeTraversal;
+extern const RuleInfo TreeFold;
 extern const RuleInfo IsInTailPosition;
 extern const RuleInfo IsInTailPositionExpr;
 extern const RuleInfo IsPureExprIgnoringRecursiveCalls;

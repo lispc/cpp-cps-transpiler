@@ -8,7 +8,10 @@ const RuleInfo TailRecursion{"TailRecursionRule", 10};
 const RuleInfo Accumulator{"AccumulatorRule", 20};
 const RuleInfo Tupling{"TuplingRule", 30};
 const RuleInfo Memoization{"MemoizationRule", 40};
+const RuleInfo MultiDimMemo{"MultiDimMemoRule", 50};
+const RuleInfo Unfold{"UnfoldRule", 25};
 const RuleInfo BinaryStack{"BinaryStackRule", 100};
+const RuleInfo TreeFold{"TreeFoldRule", 120};
 const RuleInfo TreeTraversal{"TreeTraversalRule", 150};
 const RuleInfo IsInTailPosition{"IsInTailPositionRule", 160};
 const RuleInfo IsInTailPositionExpr{"IsInTailPositionExprRule", 160};
@@ -27,9 +30,12 @@ const std::vector<const RuleInfo *> &All() {
   static std::vector<const RuleInfo *> kAll = {
       &TailRecursion,
       &Accumulator,
+      &Unfold,
       &Tupling,
       &Memoization,
+      &MultiDimMemo,
       &BinaryStack,
+      &TreeFold,
       &TreeTraversal,
       &IsInTailPosition,
       &IsInTailPositionExpr,
@@ -59,8 +65,14 @@ std::vector<std::unique_ptr<TransformationRule>> CreateDefaultRules() {
       rules.emplace_back(std::make_unique<TuplingRule>());
     else if (info == &RuleCatalog::Memoization)
       rules.emplace_back(std::make_unique<MemoizationRule>());
+    else if (info == &RuleCatalog::MultiDimMemo)
+      rules.emplace_back(std::make_unique<MultiDimMemoRule>());
+    else if (info == &RuleCatalog::Unfold)
+      rules.emplace_back(std::make_unique<UnfoldRule>());
     else if (info == &RuleCatalog::BinaryStack)
       rules.emplace_back(std::make_unique<BinaryStackRule>());
+    else if (info == &RuleCatalog::TreeFold)
+      rules.emplace_back(std::make_unique<TreeFoldRule>());
     else if (info == &RuleCatalog::TreeTraversal)
       rules.emplace_back(std::make_unique<TreeTraversalRule>());
     else if (info == &RuleCatalog::IsInTailPosition)

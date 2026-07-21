@@ -170,12 +170,15 @@ int f(int n) {
 |--------|------|----------|----------|------|
 | 1 | **TailRecursionRule** | 所有递归调用都处于尾部位置 | `while (1)` + 参数重赋值 | `clamp_down(n-1)` |
 | 2 | **AccumulatorRule** | 单递归调用与可结合运算组合 | `while` + 累加器/累乘器 | `n * fact(n-1)` |
-| 3 | **TuplingRule** | k 阶线性齐次递推 | O(n) 数组/元组循环 | `fib(n)=fib(n-1)+fib(n-2)` |
-| 4 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
-| 5 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接（`&&`/`\|\|` 因短路语义不在这里处理） | 显式帧栈 | `fib(n-1)+fib(n-2)` |
-| 6 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
-| 7 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归；支持 boolean any/all 与指针 find-first | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
-| 8 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
+| 3 | **UnfoldRule** | 构造型递归（anamorphism）：递归调用出现在局部变量初始化里，结果逐层构建 | 下行收集参数 + 上行回放构建语句 | `auto r = f(n-1); r.push_back(n); return r;` |
+| 4 | **TuplingRule** | k 阶线性齐次递推 | O(n) 数组/元组循环 | `fib(n)=fib(n-1)+fib(n-2)` |
+| 5 | **MemoizationRule** | 含重叠子问题的 k 阶线性递推 | O(n) 一维 DP 表 | `f(n)=f(n-1)+2*f(n-2)+1` |
+| 6 | **MultiDimMemoRule** | 多维常数偏移递推（允许 min/max 与不变传递参数） | 多维 DP 表 + 嵌套循环 | `f(i,j)=max(f(i-1,j), f(i,j-1))` |
+| 7 | **BinaryStackRule** | 两个递归调用直接由 `+` `*` `\|` `^` 连接（`&&`/`\|\|` 因短路语义不在这里处理） | 显式帧栈 | `fib(n-1)+fib(n-2)` |
+| 8 | **TreeFoldRule** | 树 catamorphism/paramorphism：在节点的 `->member` 上递归并组合结果 | 后序遍历双栈（无 marker） | `t->val + f(t->left) + f(t->right)` |
+| 9 | **GenericStackRule** | 任意直接递归表达式 | `enum Tag` 显式栈 + 值栈 | `min(f(n-1), f(n-2))` |
+| 10 | **TreeTraversalRule** | 树遍历：循环迭代子节点并在每个子节点上递归；支持 boolean any/all 与指针 find-first | 显式节点栈 | `for (child : node->children()) if (f(child)) return true;` |
+| 11 | **DefunctionalizedRule** | 兜底：单递归调用或嵌套递归表达式 | enum + switch + 帧栈 | `double_it(fact(n-1))` |
 
 规则引擎现在采用**代价选择**：对每个函数，先收集所有适用的规则，再按预估计的运行时代价（O(n) 规则优先于栈展开规则）选出最优者。这保证 TuplingRule / MemoizationRule 不会输给 BinaryStackRule / GenericStackRule，AccumulatorRule 不会输给 GenericStackRule。
 
@@ -410,12 +413,15 @@ int memo_weird(int n) {
 [按代价选择转换规则]           │
   1. TailRecursionRule       │
   2. AccumulatorRule         │
-  3. TuplingRule             │
-  4. MemoizationRule         │
-  5. BinaryStackRule         │
-  6. GenericStackRule        │
-  7. TreeTraversalRule       │
-  8. DefunctionalizedRule ◄──┘
+  3. UnfoldRule              │
+  4. TuplingRule             │
+  5. MemoizationRule         │
+  6. MultiDimMemoRule        │
+  7. BinaryStackRule         │
+  8. TreeFoldRule            │
+  9. TreeTraversalRule       │
+  10. GenericStackRule       │
+  11. DefunctionalizedRule ◄─┘
      |
      v
 [代码生成] 构建输出 IR，打印为迭代 C++ 代码
@@ -488,6 +494,21 @@ return max(f(new_args), step);
 while (!(cond1) && !(cond2) && ...) { ... }
 ```
 
+#### UnfoldRule
+
+识别构造型递归（anamorphism 半区）：
+
+```cpp
+RetType f(int n) {
+  if (n <= 0) return Seed();
+  auto r = f(n - 1);      // 递归调用藏在局部变量初始化里
+  r.push_back(n);         // 任意多条后处理语句
+  return r;
+}
+```
+
+此前这种形状没有任何规则能处理（直接报 NoApplicableRule）。转换采用两阶段：先沿递归参数**下行**把每层参数压入路径栈，命中 base case 得到 seed；再**上行**逐层弹出参数并原样回放后处理语句。参数更新复用尾递归的 `next_<param>` 模式；只允许 `p`（不变传递）或 `p - 正常数` 的实参形式。
+
 #### TuplingRule
 
 识别 k 阶线性递推：
@@ -508,9 +529,38 @@ f(n) = c1 * f(n-1) + c2 * f(n-2) + ... + ck * f(n-k) + const
 
 系数可以是任意小整数，允许常数项。要求所有递归调用都是 `f(n - c)` 形式（c 为正整数），且 base cases 覆盖 `0..max(c)-1`。生成自底向上的 `std::vector<RetType> dp(n+1)`，时间复杂度 O(n)、空间复杂度 O(n)。该规则是 TuplingRule 的更通用版本，用于非齐次或系数非 ±1 的递推。
 
+#### MultiDimMemoRule
+
+MemoizationRule 的多维推广（histomorphism 推广到多维 course-of-values）。识别：
+
+```cpp
+f(i, j) = combine(f(i - c1, j), f(i, j - c2), ...)
+```
+
+- 每个递归调用的实参按位置归类：**index 参数**（整型，实参为 `p` 或 `p - 正常数`）或 **pass-through 参数**（原样传递，如 LCS 的两个序列）。每个调用至少一个维度的 offset > 0，保证字典序下降。
+- 允许 `min`/`max`/`std::min`/`std::max` 组合多个子结果（LCS、编辑距离的关键形状）。
+- base case 必须覆盖每个 index 维度的边界层 `0..maxOff-1`（用三值条件求值逐维静态检查）。
+
+生成多维嵌套 `std::vector` DP 表 + 升序嵌套循环；每个 cell 先跑 base-case 链再算递推式，时间复杂度 O(各维度乘积)。
+
 #### BinaryStackRule
 
 当递归表达式恰好是 `f(a) op f(b)`，且 `op` 为 `+` `*` `|` `^` 时，生成一个只存储参数的帧栈。利用该运算符的结合性，在 DFS 遍历子树时直接累加 `result`，无需额外的值栈。优点是代码简洁、开销小。
+
+#### TreeFoldRule
+
+识别树上的 catamorphism / paramorphism：
+
+```cpp
+int sum(Tree *t) {
+  if (!t) return 0;
+  return t->val + sum(t->left) + sum(t->right);
+}
+```
+
+要求：单指针参数，每个递归调用的实参都是该参数的 `->member` 链（如 `t->left`、`t->right`），组合表达式纯净（允许 min/max）。组合表达式除了递归结果外还可以直接引用子节点本身（如 `t->left->val`）——这就是 paramorphism 与 catamorphism 的差别，对本规则的代码生成来说是免费的。
+
+生成后序遍历双栈：帧只含节点指针 + `expanded` 标志，不需要 GenericStackRule 的 marker/count 机器，输出显著更短。
 
 #### GenericStackRule
 
@@ -588,9 +638,12 @@ cps/
     ├── transformation_rules_helpers.h/.cc  # 规则与生成器共享的 AST 辅助函数与代码生成 helper
     ├── transformation_rule_tail.cc   # TailRecursionRule
     ├── transformation_rule_acc.cc    # AccumulatorRule
+    ├── transformation_rule_unfold.cc  # UnfoldRule（构造型递归）
     ├── transformation_rule_tupling.cc
     ├── transformation_rule_memo.cc
+    ├── transformation_rule_multimemo.cc  # MultiDimMemoRule（多维记忆化 DP）
     ├── transformation_rule_binary.cc
+    ├── transformation_rule_treefold.cc  # TreeFoldRule（树 catamorphism/paramorphism）
     ├── transformation_rule_generic.cc
     ├── transformation_rule_tree.cc    # TreeTraversalRule（树遍历递归，含 boolean any/all 与指针 find-first）
     ├── transformation_rule_string.cc  # StringStructuralRecursionRule
@@ -614,6 +667,9 @@ cps/
 - 多个 base case（if-else-if 链或 switch case），包括 accumulator 规则下的多 base case
 - 常见可结合运算的 accumulator 转换：`+`、`*`、`|`、`^`、`min`、`max`
 - k 阶线性递推的 tupling 转换
+- 多维常数偏移递推的记忆化 DP（MultiDimMemoRule）：网格路径、LCS、编辑距离等，允许 min/max 与不变传递参数
+- 构造型递归（UnfoldRule）：`auto r = f(n-1); r.push_back(...); return r;` 等逐层构建形状
+- 树 catamorphism / paramorphism（TreeFoldRule）：在 `->member` 链上递归类组合结果，组合式可直接引用子节点
 - 嵌套递归（递归调用的参数仍是递归调用）
 - 相互递归（相同签名的函数组；全尾调用组走枚举 dispatcher，混合组走通用栈 dispatcher 并对尾调用成员做零 Marker 优化）
 - 副作用纯度分析：含副作用的表达式自动降级到保持求值顺序的显式栈规则

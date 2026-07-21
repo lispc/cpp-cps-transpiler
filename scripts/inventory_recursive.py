@@ -314,6 +314,10 @@ MANUAL_TEST_CASES = {
     "IsPureExprIgnoringRecursiveCallsImpl": ["is_pure_expr_ignore_original"],
     "EvalConditionForParam": ["eval_condition_original"],
     "CollectRecursiveCallsInStmt": ["collect_recursive_calls_original"],
+    # The Impl is the worker behind the public wrapper exercised by this case.
+    "PrintExprWithReplacementsImpl": ["print_expr_with_replacements_original"],
+    # Same boolean-any-over-children shape family as ExprContainsDeclRef.
+    "ExprContainsDeclRefOutsideHoles": ["expr_contains_decl_ref"],
 }
 
 

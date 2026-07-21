@@ -33,8 +33,11 @@ set(SOURCES
   src/transformation_rule_acc.cc
   src/transformation_rule_tupling.cc
   src/transformation_rule_memo.cc
+  src/transformation_rule_multimemo.cc
+  src/transformation_rule_unfold.cc
   src/transformation_rule_binary.cc
   src/transformation_rule_generic.cc
+  src/transformation_rule_treefold.cc
   src/transformation_rule_defun.cc
   src/transformation_rule_tree.cc
   src/transformation_rule_structural_subrules.cc
