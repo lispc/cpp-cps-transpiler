@@ -162,9 +162,34 @@ int f(int n) {
 
 ---
 
+## Showcase 4：签名不同的 void 相互递归（协程 trampoline）
+
+输入：visitor 风格的打印器组——成员返回类型都是 `void`，签名只在节点指针类型上不同，递归调用是穿插在输出语句之间的普通语句（还可能出现在循环体里）：
+
+```cpp
+void printStmt(StrBuf &os, const IRStmt *s, int level);
+void printBlock(StrBuf &os, const IRBlockNode *blk, int level);
+void printBracedBlock(StrBuf &os, const IRBlockNode *blk, int level) {
+  buf_put(os, "{\n");
+  printBlock(os, blk, level + 1);   // 语句位置的相互递归调用
+  buf_indent(os, level);
+  buf_put(os, "}");
+}
+```
+
+输出特点：
+- 值合并类的相互递归后端要求全组签名一致、递归以 `return` 表达式出现，此组两者都不满足，自动转入 **coroutine-trampoline 后端**（`src/cps_generator_mutual_coroutine.cc`）。
+- 每个成员几乎原样变成一个 C++20 协程：组内调用改写为 `co_yield __cps_<callee>_impl(args...)`，`return;` 改写为 `co_return;`，局部变量、循环状态、控制流全部由协程帧保存，无需按形状分析语句序列。
+- 生成的 driver 用一个显式栈驱动所有协程句柄：native 调用栈不随遍历深度增长，协程帧在堆上分配。
+- 该后端的生成代码需要 **C++20**（`<coroutine>`）；对应测试用例通过 `tests/cases/<name>/std.txt` 声明。
+
+完整文件见 [`tests/test_input_print_ir.cc`](tests/test_input_print_ir.cc) 与 [`tests/test_input_mutual_coro_tail.cc`](tests/test_input_mutual_coro_tail.cc)。
+
+---
+
 ## 支持的转换规则
 
-转换器内部维护一条**有序规则链**。对同一个递归函数，按下面的顺序匹配，第一个适用的规则获胜。
+转换器内部维护一张**规则目录**（`RuleCatalog`）。对同一个递归函数，所有适用的规则按预估计的运行时代价竞争，代价最小者获胜；代价相同则按目录登记顺序取胜。
 
 | 优先级 | 规则 | 适用场景 | 输出形式 | 示例 |
 |--------|------|----------|----------|------|
@@ -465,7 +490,7 @@ public:
 };
 ```
 
-`applies` 负责**模式识别**，`apply` 负责**代码生成**，返回 `CpsResult`（`std::string` 或 `CpsError`），失败时携带具体的错误码和消息而不是空字符串。新增一种转换模式只需要：新增一个规则类，在 `RuleCatalog` 中登记名称/代价，并把它加入默认规则序列。
+`applies` 负责**模式识别**，`apply` 负责**代码生成**，返回 `CpsResult`（`std::string` 或 `CpsError`），失败时携带具体的错误码和消息而不是空字符串。规则的名称/代价不属于类本身，而是集中在 `RuleCatalog`：新增一种转换模式只需要新增一个规则类，并在 `transformation_rules.cc` 的目录里登记一条 `RuleInfo{名称, 代价, 工厂}` 及其在 `All()` 中的位置，引擎会据此创建实例并按代价选择。
 
 原来集中在 `StructuralRecursionRule` 里的 8 个手写状态机形状（`IsInTailPosition`、`EvalCondition`、`ParseLinearTerms` 等）已拆分为 `transformation_rule_structural_subrules.cc` 中的独立规则，每个规则只负责一个形状。
 
@@ -672,14 +697,15 @@ cps/
 - 树 catamorphism / paramorphism（TreeFoldRule）：在 `->member` 链上递归类组合结果，组合式可直接引用子节点
 - 嵌套递归（递归调用的参数仍是递归调用）
 - 相互递归（相同签名的函数组；全尾调用组走枚举 dispatcher，混合组走通用栈 dispatcher 并对尾调用成员做零 Marker 优化）
+- 签名不同的 void 相互递归组（如 visitor/打印机）：组内调用处于语句位置时走 coroutine-trampoline 后端，生成代码需要 C++20
 - 副作用纯度分析：含副作用的表达式自动降级到保持求值顺序的显式栈规则
 
 ### 🚧 限制
 
 - 只支持**直接递归**与**相互递归**；不支持函数指针、虚函数等动态分发递归
 - TuplingRule 目前仅支持系数为 `±1` 的线性递推
-- 相互递归要求函数签名相同
-- 更复杂的控制流（循环、异常、goto）不支持
+- 非 void 相互递归要求函数签名相同；void 组的语句级递归由协程后端处理（要求组内调用都在语句位置或 `return g(args);` 形式、函数体内无 lambda）
+- 更复杂的控制流（异常、goto）不支持；含递归调用的循环仅在协程后端（void 相互递归组）中原样支持
 - 生成的代码风格偏向机械翻译，可读性仍有提升空间
 
 ---

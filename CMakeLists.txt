@@ -27,6 +27,7 @@ set(SOURCES
   src/cps_generator_print.cc
   src/cps_generator_analyze.cc
   src/cps_generator_mutual.cc
+  src/cps_generator_mutual_coroutine.cc
   src/transformation_rules.cc
   src/transformation_rules_helpers.cc
   src/transformation_rule_tail.cc

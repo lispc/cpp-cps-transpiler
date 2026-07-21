@@ -30,6 +30,8 @@ switch_fact
 impure_base
 nested
 mutual
+print_ir
+mutual_coro_tail
 showcase2
 memo
 types

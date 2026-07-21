@@ -66,6 +66,16 @@ bool AllDirectRecursiveCallsNonNested(const clang::Stmt *Root,
 bool IsLoopStmt(const clang::Stmt *S);
 const clang::Stmt *GetLoopBody(const clang::Stmt *S);
 
+// If-chain helpers: unwrap single-statement CompoundStmt wrappers and return
+// the deepest IfStmt / its then-statement.
+const clang::IfStmt *GetInnermostIfStmt(const clang::IfStmt *IfS);
+const clang::Stmt *GetInnermostThen(const clang::IfStmt *IfS);
+
+// Original source text of a statement or declaration (via the Lexer,
+// preserving formatting and comments).
+std::string GetSourceText(const clang::Stmt *S, const clang::ASTContext *Ctx);
+std::string GetSourceText(const clang::Decl *D, const clang::ASTContext *Ctx);
+
 // Tree-traversal shape detection.
 // Matches functions whose body consists of (optional) leading/base-case
 // if-return statements, a single for-loop that contains exactly one direct
@@ -190,6 +200,37 @@ std::vector<std::string> ParamsUsedInCode(
     const std::vector<std::string> &ParamNames);
 void EmitTargetedUnpacks(IRBlock *blk, const std::string &ArgName,
                          const std::vector<std::string> &Params);
+
+// ============================================================
+// Base-case printing with parameter renaming
+// ============================================================
+
+// Rename specification for printing a BaseCase condition/value: the AST path
+// (CondExpr/ValueExpr present) uses DeclRepls; the string fallback (synthetic
+// base cases without AST) applies StringRepls as whole-word replacements in
+// order.  When StripParens is set, matching outer parens are removed.
+struct BaseCaseRename {
+  std::unordered_map<const clang::ValueDecl *, std::string> DeclRepls;
+  std::vector<std::pair<std::string, std::string>> StringRepls;
+  bool StripParens = false;
+  // Force the replacement-aware expression printer even when DeclRepls is
+  // empty (its output may differ subtly from plain printPretty).
+  bool UseDeclPrinter = false;
+};
+
+std::string PrintBaseCaseCond(const BaseCase &BC, const clang::ASTContext *Ctx,
+                              const BaseCaseRename &Rename = {});
+std::string PrintBaseCaseValue(const BaseCase &BC, const clang::ASTContext *Ctx,
+                               const BaseCaseRename &Rename = {});
+
+// Rename every parameter of FD to NewNames[i] (pairs with identical names are
+// skipped).
+BaseCaseRename MakeParamRename(const clang::FunctionDecl *FD,
+                               const std::vector<std::string> &NewNames);
+
+// Rename every parameter to "<CurExpr>.<param>" (frame-unpack style).
+BaseCaseRename MakeCurRename(const GenContext &Ctx, const std::string &CurExpr,
+                             bool StripParens = false);
 
 // ============================================================
 // Shared code-generation helpers

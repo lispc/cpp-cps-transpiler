@@ -7,6 +7,9 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/Basic/SourceManager.h"
+#include "clang/Lex/Lexer.h"
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -347,8 +350,6 @@ const Stmt *GetLoopBody(const Stmt *S) {
   return nullptr;
 }
 
-namespace {
-
 // Walk an IfStmt chain, unwrapping single-statement CompoundStmt wrappers,
 // and return the then-statement of the deepest IfStmt.
 const IfStmt *GetInnermostIfStmt(const IfStmt *IfS) {
@@ -374,6 +375,28 @@ const IfStmt *GetInnermostIfStmt(const IfStmt *IfS) {
 const Stmt *GetInnermostThen(const IfStmt *IfS) {
   return GetInnermostIfStmt(IfS)->getThen();
 }
+
+std::string GetSourceText(const Stmt *S, const ASTContext *Ctx) {
+  if (!S)
+    return "";
+  SourceRange Range = S->getSourceRange();
+  const SourceManager &SM = Ctx->getSourceManager();
+  const LangOptions &LO = Ctx->getLangOpts();
+  return Lexer::getSourceText(CharSourceRange::getTokenRange(Range), SM, LO)
+      .str();
+}
+
+std::string GetSourceText(const Decl *D, const ASTContext *Ctx) {
+  if (!D)
+    return "";
+  SourceRange Range = D->getSourceRange();
+  const SourceManager &SM = Ctx->getSourceManager();
+  const LangOptions &LO = Ctx->getLangOpts();
+  return Lexer::getSourceText(CharSourceRange::getTokenRange(Range), SM, LO)
+      .str();
+}
+
+namespace {
 
 // If LoopBody is an if-return whose condition is a single recursive call
 // (boolean OR) or a logical-not of a single recursive call (boolean AND),
@@ -1229,6 +1252,66 @@ bool AnyArgMatches(const CallExpr *CE,
     }
   }
   return false;
+}
+
+// ============================================================
+// Base-case printing with parameter renaming
+// ============================================================
+
+namespace {
+
+std::string PrintBaseCaseImpl(const Expr *E, const std::string &Str,
+                              const ASTContext *Ctx, const BaseCaseRename &R) {
+  std::string Out;
+  if (E) {
+    Out = (!R.UseDeclPrinter && R.DeclRepls.empty())
+              ? PrintExpr(E, Ctx)
+              : PrintExprWithDeclReplacements(E, R.DeclRepls, Ctx);
+  } else {
+    Out = Str;
+    for (const auto &KV : R.StringRepls)
+      Out = ReplaceWholeWord(Out, KV.first, KV.second);
+  }
+  return R.StripParens ? StripOuterParens(std::move(Out)) : Out;
+}
+
+} // anonymous namespace
+
+std::string PrintBaseCaseCond(const BaseCase &BC, const ASTContext *Ctx,
+                              const BaseCaseRename &Rename) {
+  return PrintBaseCaseImpl(BC.CondExpr, BC.CondStr, Ctx, Rename);
+}
+
+std::string PrintBaseCaseValue(const BaseCase &BC, const ASTContext *Ctx,
+                               const BaseCaseRename &Rename) {
+  return PrintBaseCaseImpl(BC.ValueExpr, BC.ValueStr, Ctx, Rename);
+}
+
+BaseCaseRename MakeParamRename(const FunctionDecl *FD,
+                               const std::vector<std::string> &NewNames) {
+  BaseCaseRename R;
+  R.UseDeclPrinter = true;
+  for (unsigned i = 0; i < FD->getNumParams() && i < NewNames.size(); ++i) {
+    std::string Old = FD->getParamDecl(i)->getNameAsString();
+    if (Old == NewNames[i])
+      continue;
+    R.DeclRepls[FD->getParamDecl(i)] = NewNames[i];
+    R.StringRepls.emplace_back(Old, NewNames[i]);
+  }
+  return R;
+}
+
+BaseCaseRename MakeCurRename(const GenContext &Ctx, const std::string &CurExpr,
+                             bool StripParens) {
+  BaseCaseRename R;
+  R.StripParens = StripParens;
+  R.UseDeclPrinter = true;
+  for (const ParmVarDecl *P : Ctx.Params) {
+    std::string New = CurExpr + "." + P->getNameAsString();
+    R.DeclRepls[P] = New;
+    R.StringRepls.emplace_back(P->getNameAsString(), New);
+  }
+  return R;
 }
 
 // ============================================================

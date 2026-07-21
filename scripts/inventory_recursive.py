@@ -318,6 +318,11 @@ MANUAL_TEST_CASES = {
     "PrintExprWithReplacementsImpl": ["print_expr_with_replacements_original"],
     # Same boolean-any-over-children shape family as ExprContainsDeclRef.
     "ExprContainsDeclRefOutsideHoles": ["expr_contains_decl_ref"],
+    # The output_ir printer group is exercised as one adapted mutual group.
+    "printStmt": ["print_ir"],
+    "printBlock": ["print_ir"],
+    "printBracedBlock": ["print_ir"],
+    "printIfChain": ["print_ir"],
 }
 
 

@@ -33,6 +33,66 @@ std::string CommonPrefix(const std::vector<std::string> &Names) {
   return prefix;
 }
 
+// Names shared by the mutual dispatcher backends: the tag enum, the
+// dispatcher function (common prefix of member names if available), and the
+// member names themselves.
+struct MutualDispatchNames {
+  std::string EnumName;
+  std::string DispatcherName;
+  std::vector<std::string> MemberNames;
+};
+
+MutualDispatchNames
+ComputeMutualDispatchNames(const std::vector<const FunctionDecl *> &FDs) {
+  MutualDispatchNames N;
+  N.EnumName = FDs[0]->getNameAsString() + "MutualTag";
+  for (const FunctionDecl *FD : FDs)
+    N.MemberNames.push_back(FD->getNameAsString());
+  std::string prefix = CommonPrefix(N.MemberNames);
+  N.DispatcherName = prefix.empty() ? N.MemberNames[0] : prefix;
+  N.DispatcherName += "_dispatch";
+  return N;
+}
+
+// "retType dispatcherName(EnumName tag, T0 p0, T1 p1, ...)".
+std::string
+BuildMutualDispatcherSig(const MutualDispatchNames &N,
+                         const std::string &retType,
+                         const std::vector<std::string> &paramTypes,
+                         const std::vector<std::string> &paramNames) {
+  std::string sig = retType + " " + N.DispatcherName + "(" + N.EnumName + " tag";
+  for (size_t i = 0; i < paramNames.size(); ++i)
+    sig += ", " + paramTypes[i] + " " + paramNames[i];
+  sig += ")";
+  return sig;
+}
+
+// Emit one wrapper per group member, with the member's original name,
+// forwarding to the dispatcher with the member's tag.
+void EmitMutualWrappers(IRBuilder &b, const MutualDispatchNames &N,
+                        const std::vector<const FunctionDecl *> &FDs,
+                        const std::string &retType,
+                        const std::vector<std::string> &paramTypes,
+                        const std::vector<std::string> &paramNames) {
+  for (const FunctionDecl *FD : FDs) {
+    std::string wrapperSig = retType + " " + FD->getNameAsString() + "(";
+    for (size_t i = 0; i < paramNames.size(); ++i) {
+      if (i > 0)
+        wrapperSig += ", ";
+      wrapperSig += paramTypes[i] + " " + paramNames[i];
+    }
+    wrapperSig += ")";
+    std::string call =
+        N.DispatcherName + "(" + N.EnumName + "::" + FD->getNameAsString();
+    for (const auto &p : paramNames)
+      call += ", " + p;
+    call += ")";
+    auto wrapperBody = IRBuilder::block();
+    IRBuilder::add(wrapperBody.get(), IRBuilder::ret(IRExpr(call)));
+    b.function(wrapperSig, std::move(wrapperBody));
+  }
+}
+
 // Build a Decl* -> new-name replacement map for the parameters of FD.
 std::unordered_map<const ValueDecl *, std::string>
 BuildParamRenameMap(const FunctionDecl *FD,
@@ -71,17 +131,13 @@ std::string RenameParams(const std::string &Src, const FunctionDecl *FD,
 std::string RenameBaseCaseCond(const BaseCase &bc, const FunctionDecl *FD,
                                const std::vector<std::string> &NewNames,
                                const ASTContext *Ctx) {
-  if (bc.CondExpr)
-    return RenameParams(bc.CondExpr, FD, NewNames, Ctx);
-  return RenameParams(bc.CondStr, FD, NewNames);
+  return PrintBaseCaseCond(bc, Ctx, MakeParamRename(FD, NewNames));
 }
 
 std::string RenameBaseCaseValue(const BaseCase &bc, const FunctionDecl *FD,
                                 const std::vector<std::string> &NewNames,
                                 const ASTContext *Ctx) {
-  if (bc.ValueExpr)
-    return RenameParams(bc.ValueExpr, FD, NewNames, Ctx);
-  return RenameParams(bc.ValueStr, FD, NewNames);
+  return PrintBaseCaseValue(bc, Ctx, MakeParamRename(FD, NewNames));
 }
 
 void EmitRenamedStmtsToIR(IRBlock *blk,
@@ -143,12 +199,22 @@ CpsResult GenerateMutualGenericStackCPS(
     const std::string &retType, const std::vector<std::string> &paramTypes,
     const std::vector<std::string> &paramNames);
 
-CpsResult GenerateMutualCPS(
+// The classic mutual backends (tail-loop dispatcher and generic-stack
+// dispatcher).  Requires identical member signatures and return-expression
+// recursion; anything else returns an error and leaves fallback to the
+// caller (GenerateMutualCPS).
+static CpsResult GenerateMutualClassicCPS(
     const std::vector<const FunctionDecl *> &FDs) {
   if (FDs.empty())
     return MakeError(CpsErrorCode::InternalError, "empty mutual recursion group");
 
   const ASTContext *Ctx = &FDs[0]->getASTContext();
+
+  bool allVoid = true;
+  for (const FunctionDecl *FD : FDs) {
+    if (!FD->getReturnType()->isVoidType())
+      allVoid = false;
+  }
 
   // Require identical signatures (same return type and parameter types).
   std::string retType = NormalizeTypeName(FDs[0]->getReturnType().getAsString());
@@ -210,31 +276,29 @@ CpsResult GenerateMutualCPS(
       break;
   }
 
-  if (!allTailCalls)
+  if (!allTailCalls) {
+    // The generic-stack backend combines child results on a values stack,
+    // which cannot work for void groups; fail here and let the caller route
+    // the group to the coroutine trampoline instead of emitting an
+    // ill-formed std::vector<void>.
+    if (allVoid)
+      return MakeError(CpsErrorCode::UnsupportedBodyShape,
+                       "void mutual recursion with non-tail calls is only "
+                       "supported in statement-level (coroutine) shape",
+                       groupName);
     return GenerateMutualGenericStackCPS(FDs, Analyses, retType, paramTypes,
                                          paramNames);
+  }
 
   IRBuilder b;
   b.comment("=== Generated mutual-recursion code ===");
 
-  // Enum tag.
-  std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
-  std::vector<std::string> memberNames;
-  for (const FunctionDecl *FD : FDs)
-    memberNames.push_back(FD->getNameAsString());
-  b.enumDef(enumName, memberNames);
-
-  // Dispatcher name: use common prefix if available, otherwise first function.
-  std::string prefix = CommonPrefix(memberNames);
-  std::string dispatcherName = prefix.empty() ? memberNames[0] : prefix;
-  dispatcherName += "_dispatch";
-
-  // Dispatcher signature.
-  std::string sig = retType + " " + dispatcherName +
-                    "(" + enumName + " tag";
-  for (size_t i = 0; i < paramNames.size(); ++i)
-    sig += ", " + paramTypes[i] + " " + paramNames[i];
-  sig += ")";
+  // Enum tag and dispatcher.
+  const MutualDispatchNames Names = ComputeMutualDispatchNames(FDs);
+  const std::string enumName = Names.EnumName;
+  b.enumDef(enumName, Names.MemberNames);
+  std::string sig =
+      BuildMutualDispatcherSig(Names, retType, paramTypes, paramNames);
 
   auto dispatcherBody = IRBuilder::block();
   auto loopBody = IRBuilder::block();
@@ -277,24 +341,35 @@ CpsResult GenerateMutualCPS(
   b.function(sig, std::move(dispatcherBody));
 
   // Wrapper functions.
-  for (const FunctionDecl *FD : FDs) {
-    std::string wrapperSig = retType + " " + FD->getNameAsString() + "(";
-    for (size_t i = 0; i < paramNames.size(); ++i) {
-      if (i > 0) wrapperSig += ", ";
-      wrapperSig += paramTypes[i] + " " + paramNames[i];
-    }
-    wrapperSig += ")";
-    std::string call = dispatcherName + "(" + enumName + "::" +
-                       FD->getNameAsString();
-    for (const auto &p : paramNames)
-      call += ", " + p;
-    call += ")";
-    auto wrapperBody = IRBuilder::block();
-    IRBuilder::add(wrapperBody.get(), IRBuilder::ret(IRExpr(call)));
-    b.function(wrapperSig, std::move(wrapperBody));
-  }
+  EmitMutualWrappers(b, Names, FDs, retType, paramTypes, paramNames);
 
   return PrintGeneratedUnit(b.unit);
+}
+
+CpsResult GenerateMutualCPS(const std::vector<const FunctionDecl *> &FDs) {
+  if (FDs.empty())
+    return MakeError(CpsErrorCode::InternalError,
+                     "empty mutual recursion group");
+
+  CpsResult Result = GenerateMutualClassicCPS(FDs);
+  if (!IsError(Result))
+    return Result;
+
+  // All-void groups with statement-level recursion (e.g. visitor-style
+  // printers whose member signatures differ only in the node pointer type)
+  // cannot use the value-combining classic backends; try the coroutine
+  // trampoline before giving up.
+  bool allVoid = true;
+  for (const FunctionDecl *FD : FDs) {
+    if (!FD->getReturnType()->isVoidType())
+      allVoid = false;
+  }
+  if (allVoid) {
+    CpsResult Alt = GenerateMutualCoroutineCPS(FDs);
+    if (!IsError(Alt))
+      return Alt;
+  }
+  return Result;
 }
 
 CpsResult GenerateMutualGenericStackCPS(
@@ -349,13 +424,10 @@ CpsResult GenerateMutualGenericStackCPS(
         (holes.size() == 1 && holes[0] == Analyses.at(name).RecExpr);
   }
 
-  // Dispatcher name.
-  std::vector<std::string> names;
-  for (const FunctionDecl *FD : FDs)
-    names.push_back(FD->getNameAsString());
-  std::string prefix = CommonPrefix(names);
-  std::string dispatcherName = prefix.empty() ? names[0] : prefix;
-  dispatcherName += "_dispatch";
+  // Dispatcher naming (shared with the tail-dispatcher backend).
+  const MutualDispatchNames Names = ComputeMutualDispatchNames(FDs);
+  const std::string dispatcherName = Names.DispatcherName;
+  const std::string enumName = Names.EnumName;
 
   IRBuilder b;
   // Use the dispatcher name as the base for frame/entry types so multiple
@@ -365,8 +437,7 @@ CpsResult GenerateMutualGenericStackCPS(
   smg.emitIncludes(b);
 
   // Function tag enum.
-  std::string enumName = FDs[0]->getNameAsString() + "MutualTag";
-  b.enumDef(enumName, names);
+  b.enumDef(enumName, Names.MemberNames);
 
   smg.addTagField(enumName);
   for (size_t i = 0; i < paramNames.size(); ++i)
@@ -375,10 +446,8 @@ CpsResult GenerateMutualGenericStackCPS(
   smg.emitStackEntryStruct(b);
 
   // Dispatcher signature.
-  std::string sig = retType + " " + dispatcherName + "(" + enumName + " tag";
-  for (size_t i = 0; i < paramNames.size(); ++i)
-    sig += ", " + paramTypes[i] + " " + paramNames[i];
-  sig += ")";
+  std::string sig =
+      BuildMutualDispatcherSig(Names, retType, paramTypes, paramNames);
 
   auto buildFrameArgs = [&](const std::string &tagExpr,
                             const std::vector<std::string> &argValues) {
@@ -520,22 +589,7 @@ CpsResult GenerateMutualGenericStackCPS(
   b.function(sig, std::move(body));
 
   // Wrapper functions.
-  for (const FunctionDecl *FD : FDs) {
-    std::string wrapperSig = retType + " " + FD->getNameAsString() + "(";
-    for (size_t i = 0; i < paramNames.size(); ++i) {
-      if (i > 0) wrapperSig += ", ";
-      wrapperSig += paramTypes[i] + " " + paramNames[i];
-    }
-    wrapperSig += ")";
-    std::string call = dispatcherName + "(" + enumName + "::" +
-                       FD->getNameAsString();
-    for (const auto &p : paramNames)
-      call += ", " + p;
-    call += ")";
-    auto wrapperBody = IRBuilder::block();
-    IRBuilder::add(wrapperBody.get(), IRBuilder::ret(IRExpr(call)));
-    b.function(wrapperSig, std::move(wrapperBody));
-  }
+  EmitMutualWrappers(b, Names, FDs, retType, paramTypes, paramNames);
 
   return PrintGeneratedUnit(b.unit);
 }

@@ -44,6 +44,14 @@ def load_case(name):
         with open(preamble_path, "r", encoding="utf-8") as f:
             preamble = f.read()
 
+    # Optional per-case C++ standard override (e.g. "c++20" for cases whose
+    # generated code uses coroutines). Defaults to the cps_testlib standard.
+    std = "c++17"
+    std_path = os.path.join(case_dir, "std.txt")
+    if os.path.exists(std_path):
+        with open(std_path, "r", encoding="utf-8") as f:
+            std = f.read().strip()
+
     expected = []
     expected_path = os.path.join(case_dir, "expected.txt")
     if os.path.exists(expected_path):
@@ -55,6 +63,7 @@ def load_case(name):
         "input": input_path,
         "main": main,
         "preamble": preamble,
+        "std": std,
         "expected": expected,
     }
 
@@ -78,7 +87,7 @@ def run_test(test):
         raw = cps.run_transpiler(TRANSPILER, test["input"])
         generated = cps.strip_diagnostic_lines(raw)
         out = cps.compile_and_run(
-            generated, test["main"], test.get("preamble")
+            generated, test["main"], test.get("preamble"), std=test.get("std", "c++17")
         )
         cps.check_output(out, test["expected"])
         print("PASS")
